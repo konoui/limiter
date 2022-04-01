@@ -95,10 +95,11 @@ type RateLimit struct {
 }
 
 type ddbItem struct {
-	BucketID      string `dynamodbav:"bucket_id" json:"bucket_id"`
-	BucketShardID int64  `dynamodbav:"bucket_shard_id" json:"bucket_shard_id"`
-	TokenCount    int64  `dynamodbav:"token_count" json:"token_count"`
-	LastUpdated   int64  `dynamodbav:"last_updated" json:"last_updated"`
+	BucketID       string `dynamodbav:"bucket_id" json:"bucket_id"`
+	BucketShardID  int64  `dynamodbav:"bucket_shard_id" json:"bucket_shard_id"`
+	TokenCount     int64  `dynamodbav:"token_count" json:"token_count"`
+	LastUpdated    int64  `dynamodbav:"last_updated" json:"last_updated"`
+	ShardBurstSize int64  `dynamodbav:"shard_burst_size" json:"shard_burst_size"`
 }
 
 func New(table string, bucket *TokenBucket, client *dynamodb.Client) *RateLimit {
@@ -147,7 +148,7 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	if now > item.LastUpdated {
 		refilTokenCount := l.calculateRefilToken(item, now)
 		// store subtracted token as a token will be used for get-token
-		_, retErr = l.refilToken(ctx, bucketID, shardID, refilTokenCount-1, now)
+		_, retErr = l.refilToken(ctx, bucketID, shardID, item.ShardBurstSize, refilTokenCount-1, now)
 		if retErr == nil {
 			// available token are current token count + refil token count
 			return token + refilTokenCount, nil
@@ -187,14 +188,14 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 
 func (l *RateLimit) calculateRefilToken(item *ddbItem, now int64) int64 {
 	refil := l.bucket.baseTokens[item.BucketShardID] * (now - item.LastUpdated)
-	burst := l.bucket.burstTokens[item.BucketShardID] - item.TokenCount
-	if refil > burst {
-		return burst
+	burstable := item.ShardBurstSize - item.TokenCount
+	if refil > burstable {
+		return burstable
 	}
 	return refil
 }
 
-func (l *RateLimit) refilToken(ctx context.Context, bucketID string, shardID, refilTokenCount, now int64) (int64, error) {
+func (l *RateLimit) refilToken(ctx context.Context, bucketID string, shardID, shardBurstSize, refilTokenCount, now int64) (int64, error) {
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
 	condUpdated := expression.Name("last_updated").
 		LessThan(
@@ -202,7 +203,7 @@ func (l *RateLimit) refilToken(ctx context.Context, bucketID string, shardID, re
 		And(
 			expression.ConditionBuilder(expression.Name("token_count").
 				LessThan(
-					expression.Value(l.bucket.burstTokens[shardID]),
+					expression.Value(shardBurstSize),
 				)),
 		)
 	condExpr := condNotExist.Or(expression.ConditionBuilder(condUpdated))
@@ -292,10 +293,11 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 	requests := make([]types.WriteRequest, 0, len(shards))
 	for _, shardID := range shards {
 		item := &ddbItem{
-			BucketID:      bucketID,
-			BucketShardID: shardID,
-			LastUpdated:   now,
-			TokenCount:    l.bucket.burstTokens[shardID],
+			BucketID:       bucketID,
+			BucketShardID:  shardID,
+			LastUpdated:    now,
+			TokenCount:     l.bucket.burstTokens[shardID],
+			ShardBurstSize: l.bucket.burstTokens[shardID],
 		}
 		attrs, err := attributevalue.MarshalMap(item)
 		if err != nil {

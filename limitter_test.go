@@ -102,11 +102,12 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
-		if want := base * 2; token != want {
+		// base -1 tokens(consumed by previous getToken) + refilled base tokens
+		if want := base*2 - 1; token != want {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
-		// not refil
+		// refil
 		time.Sleep(interval)
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
