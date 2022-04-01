@@ -35,18 +35,24 @@ func WithInterval(interval time.Duration) Option {
 }
 
 func NewTokenBucket(rateLimit, burstSize int64, opts ...Option) *TokenBucket {
-	if rateLimit == 0 {
-		rateLimit = 1
-	}
-	if rateLimit*2 > burstSize {
-		burstSize = rateLimit * 2
-	}
-
 	config := &tokenBucketConfig{
 		interval: 60 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(config)
+	}
+
+	if rateLimit == 0 {
+		return &TokenBucket{
+			numofShards: 0,
+			baseTokens:  []int64{},
+			burstTokens: []int64{},
+			config:      config,
+		}
+	}
+
+	if rateLimit*2 > burstSize {
+		burstSize = rateLimit * 2
 	}
 
 	maxRate := 500 * config.interval.Seconds()
@@ -119,6 +125,11 @@ func pickIndex(min int) int {
 
 func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, error) {
 	shardIDs := l.bucket.makeShards()
+	// bucket size is zero
+	if len(shardIDs) == 0 || l.bucket.numofShards == 0 {
+		return true, nil
+	}
+
 	i := pickIndex(len(shardIDs))
 	shardID := shardIDs[i]
 	return l.shouldThrottle(ctx, bucketID, shardID)

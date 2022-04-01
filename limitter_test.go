@@ -48,6 +48,24 @@ func testRateLimit(t *testing.T, b *TokenBucket) *RateLimit {
 }
 
 func TestRateLimit_ShouldThrottle(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		ctx := context.Background()
+		bucket := NewTokenBucket(0, 0)
+		l := testRateLimit(t, bucket)
+		id := int64String(int64(pickIndex(10000)))
+		if err := l.PrepareTokens(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+
+		throttled, err := l.ShouldThrottle(context.Background(), id)
+		if err != nil {
+			t.Errorf("throttle error %v", err)
+		}
+		if !throttled {
+			t.Errorf("unexpected non throttling")
+		}
+	})
+
 	t.Run("throttle", func(t *testing.T) {
 		ctx := context.Background()
 		base := int64(5)
