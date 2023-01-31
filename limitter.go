@@ -1,4 +1,4 @@
-package limitter
+package limiter
 
 import (
 	"context"
@@ -93,6 +93,19 @@ func distribute(token, numofShard int64) []int64 {
 	}
 	return shards
 }
+
+type Limiter interface {
+	ShouldThrottle(context.Context, string) (bool, error)
+}
+
+type Preparer interface {
+	PrepareTokens(context.Context, string) error
+}
+
+var (
+	_ Limiter  = &RateLimit{}
+	_ Preparer = &RateLimit{}
+)
 
 type RateLimit struct {
 	client    *dynamodb.Client

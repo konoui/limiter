@@ -1,4 +1,4 @@
-module github.com/konoui/limitter
+module github.com/konoui/limiter
 
 go 1.17
 
@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.6.0
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression v1.3.7
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.13.0
+	github.com/google/uuid v1.3.0
 )
 
 require (

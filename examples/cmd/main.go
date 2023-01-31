@@ -8,7 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/konoui/limitter"
+	"github.com/konoui/limiter"
 )
 
 type usage string
@@ -39,11 +39,11 @@ func detectUsage(bucketID string) usage {
 
 var (
 	tableName = getEnv("TABLE_NAME", "buckets_table")
-	buckets   = map[usage]*limitter.TokenBucket{
-		free:    limitter.NewTokenBucket(6, 12),
-		usual:   limitter.NewTokenBucket(12, 24),
-		advance: limitter.NewTokenBucket(12, 24),
-		unknown: limitter.NewTokenBucket(1, 1),
+	buckets   = map[usage]*limiter.TokenBucket{
+		free:    limiter.NewTokenBucket(6, 12),
+		usual:   limiter.NewTokenBucket(12, 24),
+		advance: limiter.NewTokenBucket(12, 24),
+		unknown: limiter.NewTokenBucket(1, 1),
 	}
 )
 
@@ -65,7 +65,7 @@ func main() {
 	usage := detectUsage(id)
 	bucket := buckets[usage]
 	fmt.Printf("%#v\n", bucket)
-	r := limitter.New(tableName,
+	r := limiter.New(tableName,
 		bucket,
 		client,
 	)

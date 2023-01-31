@@ -3,68 +3,71 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
 
-	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/konoui/limitter"
+	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
+	"github.com/konoui/limiter"
 )
 
-var r *limitter.RateLimit
+var (
+	rl *limiter.RateLimit
+)
 
 func init() {
-	ctx := context.Background()
-	cfg, err := config.LoadDefaultConfig(ctx)
+	if rl != nil {
+		return
+	}
+
+	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 	client := dynamodb.NewFromConfig(cfg)
-	bucket := limitter.NewTokenBucket(10, 20)
+	bucket := limiter.NewTokenBucket(10, 20)
 	fmt.Printf("bucket %#v\n", bucket)
-	r = limitter.New("buckets_table",
-		bucket,
-		client,
-	)
+	// set global client
+	rl = limiter.New("buckets_table", bucket, client)
 }
 
-func handler(ctx context.Context, request events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	if request.RequestContext.HTTP.Method == "POST" {
-		id := "new-bucket"
-		if err := r.PrepareTokens(ctx, id); err != nil {
-			return events.APIGatewayV2HTTPResponse{}, err
-		}
-		return events.APIGatewayV2HTTPResponse{
-			Body:       fmt.Sprintf("created %s", id),
-			StatusCode: 200,
-		}, nil
-	}
-
-	token, ok := request.Headers["X-Api-Token"]
-	if !ok {
-		return events.APIGatewayV2HTTPResponse{
-			Body:       fmt.Sprintf("X-Api-Token header: is empty"),
-			StatusCode: 400,
-		}, nil
-	}
-	throttle, err := r.ShouldThrottle(ctx, token)
-	if err != nil {
-		return events.APIGatewayV2HTTPResponse{}, err
-	}
-
-	if throttle {
-		return events.APIGatewayV2HTTPResponse{
-			Body:       fmt.Sprintf("throttle"),
-			StatusCode: 429,
-		}, nil
-	}
-
-	return events.APIGatewayV2HTTPResponse{
-		Body:       fmt.Sprintf("hello"),
-		StatusCode: 200,
-	}, nil
+func MiddlewareLimiter(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := limiter.NewLimitHandler(rl, "X-API-Token")
+		h.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
-	lambda.Start(handler)
+	mux := http.NewServeMux()
+	mux.Handle("/hello", MiddlewareLimiter(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			th, ok := limiter.FromThrottleContext(r.Context())
+			if !ok {
+				fmt.Fprintf(w, "unexpected error")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			if th.Err != nil {
+				fmt.Fprintf(w, th.Err.Error())
+				w.WriteHeader(th.Status)
+				return
+			}
+
+			if th.Throttle {
+				fmt.Fprintf(w, "throttle")
+				w.WriteHeader(th.Status)
+				return
+			}
+
+			w.WriteHeader(th.Status)
+			w.Write([]byte("ok"))
+			return
+		})))
+	mux.HandleFunc("/create", limiter.NewPrepareTokenHandler(rl))
+	lambda.Start(httpadapter.NewV2(mux).ProxyWithContext)
 }

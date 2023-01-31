@@ -1,4 +1,4 @@
-module github.com/konoui/limitter/examples/cmd
+module github.com/konoui/limiter/examples/cmd
 
 go 1.17
 
