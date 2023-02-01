@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.18.10
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.18.1
 	github.com/awslabs/aws-lambda-go-api-proxy v0.13.3
-	github.com/konoui/limiter v0.0.0-20230131131314-5485d93a0121
+	github.com/konoui/limiter v0.0.0-20230131133807-11fd11b78bea
 )
 
 require (

@@ -1,5 +1,5 @@
 FROM public.ecr.aws/docker/library/golang:latest as build-image
-
+ENV GOPROXY=direct
 WORKDIR /go/src
 COPY go.mod go.sum main.go ./
 

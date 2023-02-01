@@ -5,7 +5,7 @@ go 1.17
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.13.1
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.13.0
-	github.com/konoui/limitter v0.0.0-20220215134342-56efa68c14c9
+	github.com/konoui/limiter v0.0.0-20230131133807-11fd11b78bea
 )
 
 require (
@@ -24,5 +24,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.9.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.14.0 // indirect
 	github.com/aws/smithy-go v1.10.0 // indirect
+	github.com/google/uuid v1.3.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 )
