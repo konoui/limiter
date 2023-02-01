@@ -8,128 +8,110 @@ import (
 	"github.com/google/uuid"
 )
 
-type key int
+type key struct{}
 
-const (
-	throttleKey key = iota
-	prepareKey
-)
+var contextKey = &key{}
 
-type ThrottleContext struct {
+type Context struct {
 	Err      error
 	Throttle bool
 	Status   int
 	Token    string
 }
 
-func WithThrottleContext(ctx context.Context, t ThrottleContext) context.Context {
-	return context.WithValue(ctx, throttleKey, &t)
+func NewContext(ctx context.Context, lc *Context) context.Context {
+	return context.WithValue(ctx, contextKey, lc)
 }
 
-func FromThrottleContext(ctx context.Context) (ThrottleContext, bool) {
-	v, ok := ctx.Value(ctx).(ThrottleContext)
-	return v, ok
-}
-
-type PrepareContext struct {
-	Err    error
-	Status int
-	Token  string
-}
-
-func WithPrepareContext(ctx context.Context, t PrepareContext) context.Context {
-	return context.WithValue(ctx, prepareKey, &t)
-}
-
-func FromPrepareContext(ctx context.Context) (PrepareContext, bool) {
-	v, ok := ctx.Value(ctx).(PrepareContext)
+func FromContext(ctx context.Context) (*Context, bool) {
+	v, ok := ctx.Value(contextKey).(*Context)
 	return v, ok
 }
 
 func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get(headerKey)
-		if token != "" {
-			t := ThrottleContext{
+		if token == "" {
+			lc := &Context{
 				Token:    token,
 				Status:   http.StatusBadRequest,
 				Err:      fmt.Errorf("%s header is empty", headerKey),
 				Throttle: true,
 			}
 
-			*r = *r.WithContext(WithThrottleContext(r.Context(), t))
+			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
 		throttle, err := rl.ShouldThrottle(r.Context(), token)
 		if err != nil {
-			t := ThrottleContext{
+			lc := &Context{
 				Token:    token,
 				Status:   http.StatusInternalServerError,
 				Err:      err,
 				Throttle: true,
 			}
-			*r = *r.WithContext(WithThrottleContext(r.Context(), t))
+			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
 		if throttle {
-			t := ThrottleContext{
+			lc := &Context{
 				Token:    token,
 				Status:   http.StatusTooManyRequests,
 				Err:      nil,
 				Throttle: true,
 			}
-			*r = *r.WithContext(WithThrottleContext(r.Context(), t))
+			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
-		t := ThrottleContext{
+		lc := &Context{
 			Token:    token,
 			Status:   http.StatusOK,
 			Err:      nil,
 			Throttle: false,
 		}
-		*r = *r.WithContext(WithThrottleContext(r.Context(), t))
+		*r = *r.WithContext(NewContext(r.Context(), lc))
 	})
 }
 
 func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
-			c := PrepareContext{
+			lc := &Context{
 				Err:    fmt.Errorf("invalid method: %s", r.Method),
 				Status: http.StatusBadRequest,
 			}
-			*r = *r.WithContext(WithPrepareContext(r.Context(), c))
+			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
 		uid, err := uuid.NewRandom()
 		if err != nil {
-			c := PrepareContext{
+			lc := &Context{
 				Err:    err,
 				Status: http.StatusBadRequest,
 			}
-			*r = *r.WithContext(WithPrepareContext(r.Context(), c))
+			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
 		key := uid.String()
 		if err := rl.PrepareTokens(r.Context(), key); err != nil {
-			c := PrepareContext{
+			lc := &Context{
 				Err:    err,
 				Status: http.StatusBadRequest,
 			}
-			*r = *r.WithContext(WithPrepareContext(r.Context(), c))
+			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
-		c := PrepareContext{
+		lc := &Context{
 			Err:    nil,
 			Status: http.StatusOK,
 			Token:  key,
 		}
-		*r = *r.WithContext(WithPrepareContext(r.Context(), c))
+		*r = *r.WithContext(NewContext(r.Context(), lc))
 	})
 }

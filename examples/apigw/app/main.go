@@ -45,7 +45,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/hello", MiddlewareLimiter(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			th, ok := limiter.FromThrottleContext(r.Context())
+			th, ok := limiter.FromContext(r.Context())
 			if !ok {
 				fmt.Fprintf(w, "unexpected error")
 				w.WriteHeader(http.StatusBadRequest)

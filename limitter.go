@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+var TimeNow = time.Now
+
 type TokenBucket struct {
 	numofShards int64
 	baseTokens  []int64
@@ -76,10 +78,6 @@ func (b *TokenBucket) makeShards() []int64 {
 	return shardIDs
 }
 
-func (b *TokenBucket) now() int64 {
-	return time.Now().Unix() / int64(b.config.interval.Seconds())
-}
-
 func distribute(token, numofShard int64) []int64 {
 	base := token / numofShard
 	extra := token % numofShard
@@ -131,7 +129,7 @@ func New(table string, bucket *TokenBucket, client *dynamodb.Client) *RateLimit 
 }
 
 func pickIndex(min int) int {
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(TimeNow().UnixNano())
 	i := rand.Intn(min) //nolint:gosec,gocritic
 	return i
 }
@@ -164,18 +162,18 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64) (int64, error) {
 	item, err := l.getItem(ctx, bucketID, shardID)
 	if err != nil {
-		return 0, nil
+		return 0, err
 	}
-	now := l.bucket.now()
+	now := TimeNow().Unix()
 	token := item.TokenCount
 	var retErr error
 	if now > item.LastUpdated {
-		refilTokenCount := l.calculateRefilToken(item, now)
+		refillTokenCount := l.calculateRefillToken(item, now)
 		// store subtracted token as a token will be used for get-token
-		_, retErr = l.refilToken(ctx, bucketID, shardID, item.ShardBurstSize, refilTokenCount-1, now)
+		_, retErr = l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
 		if retErr == nil {
-			// available token are current token count + refil token count
-			return token + refilTokenCount, nil
+			// available token are current token count + refill token count
+			return token + refillTokenCount, nil
 		}
 	} else if token > 0 {
 		_, retErr = l.subtractToken(ctx, bucketID, shardID, now)
@@ -210,16 +208,17 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 	return item, nil
 }
 
-func (l *RateLimit) calculateRefilToken(item *ddbItem, now int64) int64 {
-	refil := l.bucket.baseTokens[item.BucketShardID] * (now - item.LastUpdated)
+func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
+	num := math.Floor(float64((now - item.LastUpdated)) / l.bucket.config.interval.Seconds())
+	refill := l.bucket.baseTokens[item.BucketShardID] * int64(num)
 	burstable := item.ShardBurstSize - item.TokenCount
-	if refil > burstable {
+	if refill > burstable {
 		return burstable
 	}
-	return refil
+	return refill
 }
 
-func (l *RateLimit) refilToken(ctx context.Context, bucketID string, shardID, shardBurstSize, refilTokenCount, now int64) (int64, error) {
+func (l *RateLimit) refillToken(ctx context.Context, bucketID string, shardID, shardBurstSize, refillTokenCount, now int64) (int64, error) {
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
 	condUpdated := expression.Name("last_updated").
 		LessThan(
@@ -235,7 +234,7 @@ func (l *RateLimit) refilToken(ctx context.Context, bucketID string, shardID, sh
 		Set(
 			expression.Name("last_updated"), expression.Value(now)).
 		Add(
-			expression.Name("token_count"), expression.Value(refilTokenCount),
+			expression.Name("token_count"), expression.Value(refillTokenCount),
 		)
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
@@ -300,7 +299,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 
 func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 	shards := l.bucket.makeShards()
-	now := l.bucket.now()
+	now := TimeNow().Unix()
 	batchSize := 25
 	for i := 0; i < len(shards); i += batchSize {
 		if len(shards) < batchSize+i {
