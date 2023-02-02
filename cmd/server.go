@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/konoui/limiter"
 )
@@ -27,7 +28,7 @@ func start(addr string, rl *limiter.RateLimit, headerKey string) error {
 			}
 
 			if c.Err != nil {
-				fmt.Fprintf(w, c.Err.Error())
+				fmt.Fprint(w, c.Err.Error())
 				w.WriteHeader(c.Status)
 				return
 			}
@@ -39,10 +40,13 @@ func start(addr string, rl *limiter.RateLimit, headerKey string) error {
 			}
 
 			w.WriteHeader(c.Status)
-			w.Write([]byte("ok"))
-			return
+			fmt.Fprintf(w, "ok")
 		})))
 
 	mux.HandleFunc("/create", limiter.NewPrepareTokenHandler(rl))
-	return http.ListenAndServe(addr, mux)
+	server := &http.Server{
+		Addr:              addr,
+		ReadHeaderTimeout: 3 * time.Second,
+	}
+	return server.ListenAndServe()
 }

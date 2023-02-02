@@ -17,12 +17,13 @@ func testClient(t *testing.T) *dynamodb.Client {
 		URL:               "http://localhost:8000",
 		HostnameImmutable: true,
 	}
-	optFunc := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		if service == dynamodb.ServiceID {
-			return ep, nil
-		}
-		return aws.Endpoint{}, &aws.EndpointNotFoundError{}
-	})
+	optFunc := aws.EndpointResolverWithOptionsFunc(
+		func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+			if service == dynamodb.ServiceID {
+				return ep, nil
+			}
+			return aws.Endpoint{}, &aws.EndpointNotFoundError{}
+		})
 	opt := config.WithEndpointResolverWithOptions(optFunc)
 	cfg, err := config.LoadDefaultConfig(context.Background(), opt)
 	if err != nil {
@@ -48,20 +49,9 @@ func testRateLimit(t *testing.T, b *TokenBucket) *RateLimit {
 
 func TestRateLimit_ShouldThrottle(t *testing.T) {
 	t.Run("zero", func(t *testing.T) {
-		ctx := context.Background()
-		bucket := NewTokenBucket(0, 0)
-		l := testRateLimit(t, bucket)
-		id := int64String(int64(pickIndex(10000)))
-		if err := l.PrepareTokens(ctx, id); err != nil {
-			t.Fatal(err)
-		}
-
-		throttled, err := l.ShouldThrottle(context.Background(), id)
-		if err != nil {
-			t.Errorf("throttle error %v", err)
-		}
-		if !throttled {
-			t.Errorf("unexpected non throttling")
+		_, err := NewTokenBucket(0, 0)
+		if err == nil {
+			t.Fatal("non error")
 		}
 	})
 
@@ -70,7 +60,11 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 		base := int64(2)
 		burst := base * 2
 		interval := 3 * time.Second
-		bucket := NewTokenBucket(base, burst, WithInterval(interval))
+		bucket, err := NewTokenBucket(base, burst, WithInterval(interval))
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		l := testRateLimit(t, bucket)
 
 		id := int64String(int64(pickIndex(100000)))
@@ -201,7 +195,10 @@ func TestRateLimit_calculateRefilToken(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bucket := NewTokenBucket(tt.base, tt.base*2, WithInterval(tt.interval))
+			bucket, err := NewTokenBucket(tt.base, tt.base*2, WithInterval(tt.interval))
+			if err != nil {
+				t.Fatal(err)
+			}
 			now := TimeNow().Unix()
 			l := &RateLimit{
 				client:    nil,

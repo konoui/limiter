@@ -42,7 +42,7 @@ func NewCreateTableCmd(c *dynamodb.Client) *cobra.Command {
 		DisableSuggestions: true,
 	}
 	cmd.PersistentFlags().StringVar(&tableName, "table-name", "", "dynamodb table name")
-	cmd.MarkPersistentFlagRequired("table-name")
+	_ = cmd.MarkPersistentFlagRequired("table-name")
 	return cmd
 }
 
@@ -55,11 +55,14 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 		Use:  "create-token",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bucket := limiter.NewTokenBucket(
+			bucket, err := limiter.NewTokenBucket(
 				bucketSize,
 				burstSize,
 				limiter.WithInterval(time.Duration(rate)*time.Second),
 			)
+			if err != nil {
+				return err
+			}
 
 			if burstSize != -1 {
 				burstSize = bucketSize * 2
@@ -83,8 +86,8 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", 0, "token bucket size")
 	cmd.PersistentFlags().IntVar(&rate, "rate", 1, "rate/second")
 	cmd.PersistentFlags().Int64Var(&burstSize, "bucket-burst-size", burstSize, "token bucket burst size")
-	cmd.MarkPersistentFlagRequired("table-name")
-	cmd.MarkPersistentFlagRequired("bucket-size")
+	_ = cmd.MarkPersistentFlagRequired("table-name")
+	_ = cmd.MarkPersistentFlagRequired("bucket-size")
 	return cmd
 }
 
@@ -97,11 +100,14 @@ func NewStartServer(c *dynamodb.Client) *cobra.Command {
 		Use:  "start-server",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bucket := limiter.NewTokenBucket(
+			bucket, err := limiter.NewTokenBucket(
 				bucketSize,
 				burstSize,
 				limiter.WithInterval(time.Duration(rate)*time.Second),
 			)
+			if err != nil {
+				return err
+			}
 
 			if burstSize != -1 {
 				burstSize = bucketSize * 2
@@ -118,8 +124,8 @@ func NewStartServer(c *dynamodb.Client) *cobra.Command {
 	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", 0, "token bucket size")
 	cmd.PersistentFlags().IntVar(&rate, "rate", 1, "rate/second")
 	cmd.PersistentFlags().Int64Var(&burstSize, "bucket-burst-size", burstSize, "token bucket burst size")
-	cmd.MarkPersistentFlagRequired("table-name")
-	cmd.MarkPersistentFlagRequired("bucket-size")
+	_ = cmd.MarkPersistentFlagRequired("table-name")
+	_ = cmd.MarkPersistentFlagRequired("bucket-size")
 	return cmd
 }
 

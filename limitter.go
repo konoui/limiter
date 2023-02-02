@@ -18,8 +18,11 @@ import (
 var TimeNow = time.Now
 
 type TokenBucket struct {
-	numofShards int64
-	baseTokens  []int64
+	// numOfShards presents number of shard
+	numOfShards int64
+	// baseTokens presents rateLimit per shard
+	baseTokens []int64
+	// burstTokens presents bucketSize per shard
 	burstTokens []int64
 	config      *tokenBucketConfig
 }
@@ -36,7 +39,11 @@ func WithInterval(interval time.Duration) Option {
 	}
 }
 
-func NewTokenBucket(rateLimit, burstSize int64, opts ...Option) *TokenBucket {
+// NewTokenBucket return token bucket.
+// rateLimit is a variable that tokens will be added per `interval`.
+// bucketSize is a variable that maximum tokens to store bucket.
+// `interval` is 60 second by default.
+func NewTokenBucket(rateLimit, bucketSize int64, opts ...Option) (*TokenBucket, error) {
 	config := &tokenBucketConfig{
 		interval: 60 * time.Second,
 	}
@@ -44,45 +51,40 @@ func NewTokenBucket(rateLimit, burstSize int64, opts ...Option) *TokenBucket {
 		opt(config)
 	}
 
-	if rateLimit == 0 {
-		return &TokenBucket{
-			numofShards: 0,
-			baseTokens:  []int64{},
-			burstTokens: []int64{},
-			config:      config,
-		}
+	if rateLimit <= 0 {
+		return nil, errInvalidRateLimitArg
 	}
 
-	if rateLimit*2 > burstSize {
-		burstSize = rateLimit * 2
+	if rateLimit*2 > bucketSize {
+		return nil, errInvalidRateLimitBucketSize
 	}
 
 	maxRate := 500 * config.interval.Seconds()
-	numofShards := int64(math.Ceil(float64(burstSize) / maxRate))
+	numofShards := int64(math.Ceil(float64(bucketSize) / maxRate))
 	baseTokens := distribute(rateLimit, numofShards)
-	burstTokens := distribute(burstSize, numofShards)
+	burstTokens := distribute(bucketSize, numofShards)
 	b := &TokenBucket{
-		numofShards: numofShards,
+		numOfShards: numofShards,
 		baseTokens:  baseTokens,
 		burstTokens: burstTokens,
 		config:      config,
 	}
-	return b
+	return b, nil
 }
 
 func (b *TokenBucket) makeShards() []int64 {
-	shardIDs := make([]int64, b.numofShards)
-	for i := int64(0); i < b.numofShards; i++ {
+	shardIDs := make([]int64, b.numOfShards)
+	for i := int64(0); i < b.numOfShards; i++ {
 		shardIDs[i] = i
 	}
 	return shardIDs
 }
 
-func distribute(token, numofShard int64) []int64 {
-	base := token / numofShard
-	extra := token % numofShard
-	shards := make([]int64, 0, numofShard)
-	for i := int64(0); i < numofShard; i++ {
+func distribute(token, numOfShard int64) []int64 {
+	base := token / numOfShard
+	extra := token % numOfShard
+	shards := make([]int64, 0, numOfShard)
+	for i := int64(0); i < numOfShard; i++ {
 		add := int64(0)
 		if i < extra {
 			add = 1
@@ -137,7 +139,7 @@ func pickIndex(min int) int {
 func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, error) {
 	shardIDs := l.bucket.makeShards()
 	// bucket size is zero
-	if len(shardIDs) == 0 || l.bucket.numofShards == 0 {
+	if len(shardIDs) == 0 || l.bucket.numOfShards == 0 {
 		return true, nil
 	}
 
@@ -149,6 +151,7 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
 	token, err := l.getToken(ctx, bucketID, shardID)
 	if err != nil {
+		// TODO logging or telling message to caller
 		var le *types.LimitExceededException
 		if errors.As(err, &le) {
 			return true, nil
@@ -167,8 +170,8 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	now := TimeNow().Unix()
 	token := item.TokenCount
 	var retErr error
-	if now > item.LastUpdated {
-		refillTokenCount := l.calculateRefillToken(item, now)
+	refillTokenCount := l.calculateRefillToken(item, now)
+	if refillTokenCount > 0 {
 		// store subtracted token as a token will be used for get-token
 		_, retErr = l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
 		if retErr == nil {
@@ -178,6 +181,7 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	} else if token > 0 {
 		_, retErr = l.subtractToken(ctx, bucketID, shardID, now)
 	}
+	// TODO
 	var chf *types.ConditionalCheckFailedException
 	var le *types.LimitExceededException
 	if errors.As(retErr, &chf) || errors.As(retErr, &le) {
@@ -218,7 +222,8 @@ func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 	return refill
 }
 
-func (l *RateLimit) refillToken(ctx context.Context, bucketID string, shardID, shardBurstSize, refillTokenCount, now int64) (int64, error) {
+func (l *RateLimit) refillToken(ctx context.Context,
+	bucketID string, shardID, shardBurstSize, refillTokenCount, now int64) (int64, error) {
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
 	condUpdated := expression.Name("last_updated").
 		LessThan(
@@ -284,10 +289,12 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		ConditionExpression:       expr.Condition(),
 		ReturnValues:              types.ReturnValueAllNew,
 	}
+
 	resp, err := l.client.UpdateItem(ctx, input)
 	if err != nil {
 		// ConditionalCheckFailedException will occur when token_count equals zero
 		// no handling the error
+		// TODO
 		return 0, err
 	}
 	item := new(ddbItem)
