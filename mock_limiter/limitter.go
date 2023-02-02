@@ -11,6 +11,58 @@ import (
 	gomock "github.com/golang/mock/gomock"
 )
 
+// MockLimitPreparer is a mock of LimitPreparer interface.
+type MockLimitPreparer struct {
+	ctrl     *gomock.Controller
+	recorder *MockLimitPreparerMockRecorder
+}
+
+// MockLimitPreparerMockRecorder is the mock recorder for MockLimitPreparer.
+type MockLimitPreparerMockRecorder struct {
+	mock *MockLimitPreparer
+}
+
+// NewMockLimitPreparer creates a new mock instance.
+func NewMockLimitPreparer(ctrl *gomock.Controller) *MockLimitPreparer {
+	mock := &MockLimitPreparer{ctrl: ctrl}
+	mock.recorder = &MockLimitPreparerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockLimitPreparer) EXPECT() *MockLimitPreparerMockRecorder {
+	return m.recorder
+}
+
+// PrepareTokens mocks base method.
+func (m *MockLimitPreparer) PrepareTokens(arg0 context.Context, arg1 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "PrepareTokens", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// PrepareTokens indicates an expected call of PrepareTokens.
+func (mr *MockLimitPreparerMockRecorder) PrepareTokens(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrepareTokens", reflect.TypeOf((*MockLimitPreparer)(nil).PrepareTokens), arg0, arg1)
+}
+
+// ShouldThrottle mocks base method.
+func (m *MockLimitPreparer) ShouldThrottle(arg0 context.Context, arg1 string) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ShouldThrottle", arg0, arg1)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ShouldThrottle indicates an expected call of ShouldThrottle.
+func (mr *MockLimitPreparerMockRecorder) ShouldThrottle(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShouldThrottle", reflect.TypeOf((*MockLimitPreparer)(nil).ShouldThrottle), arg0, arg1)
+}
+
 // MockLimiter is a mock of Limiter interface.
 type MockLimiter struct {
 	ctrl     *gomock.Controller
@@ -84,56 +136,4 @@ func (m *MockPreparer) PrepareTokens(arg0 context.Context, arg1 string) error {
 func (mr *MockPreparerMockRecorder) PrepareTokens(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrepareTokens", reflect.TypeOf((*MockPreparer)(nil).PrepareTokens), arg0, arg1)
-}
-
-// MockLimitPreparer is a mock of LimitPreparer interface.
-type MockLimitPreparer struct {
-	ctrl     *gomock.Controller
-	recorder *MockLimitPreparerMockRecorder
-}
-
-// MockLimitPreparerMockRecorder is the mock recorder for MockLimitPreparer.
-type MockLimitPreparerMockRecorder struct {
-	mock *MockLimitPreparer
-}
-
-// NewMockLimitPreparer creates a new mock instance.
-func NewMockLimitPreparer(ctrl *gomock.Controller) *MockLimitPreparer {
-	mock := &MockLimitPreparer{ctrl: ctrl}
-	mock.recorder = &MockLimitPreparerMockRecorder{mock}
-	return mock
-}
-
-// EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockLimitPreparer) EXPECT() *MockLimitPreparerMockRecorder {
-	return m.recorder
-}
-
-// PrepareTokens mocks base method.
-func (m *MockLimitPreparer) PrepareTokens(arg0 context.Context, arg1 string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "PrepareTokens", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// PrepareTokens indicates an expected call of PrepareTokens.
-func (mr *MockLimitPreparerMockRecorder) PrepareTokens(arg0, arg1 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrepareTokens", reflect.TypeOf((*MockLimitPreparer)(nil).PrepareTokens), arg0, arg1)
-}
-
-// ShouldThrottle mocks base method.
-func (m *MockLimitPreparer) ShouldThrottle(arg0 context.Context, arg1 string) (bool, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ShouldThrottle", arg0, arg1)
-	ret0, _ := ret[0].(bool)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// ShouldThrottle indicates an expected call of ShouldThrottle.
-func (mr *MockLimitPreparerMockRecorder) ShouldThrottle(arg0, arg1 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShouldThrottle", reflect.TypeOf((*MockLimitPreparer)(nil).ShouldThrottle), arg0, arg1)
 }

@@ -7,17 +7,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 )
 
+//go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
 type DDBClient interface {
-	UpdateItem(
-		context.Context,
-		*dynamodb.UpdateItemInput,
-		...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
-	GetItem(context.Context,
-		*dynamodb.GetItemInput,
-		...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
-	BatchWriteItem(context.Context,
-		*dynamodb.BatchWriteItemInput,
-		...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
+	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
+	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 }
 
 type wrappedDDBClient struct {
