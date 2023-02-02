@@ -15,83 +15,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-var TimeNow = time.Now
+var (
+	// TimeNow is global variable for mock
+	TimeNow               = time.Now
+	_       LimitPreparer = &RateLimit{}
+)
 
-type TokenBucket struct {
-	// numOfShards presents number of shard
-	numOfShards int64
-	// baseTokens presents rateLimit per shard
-	baseTokens []int64
-	// burstTokens presents bucketSize per shard
-	burstTokens []int64
-	config      *tokenBucketConfig
-}
-
-type tokenBucketConfig struct {
-	interval time.Duration
-}
-
-type Option func(t *tokenBucketConfig)
-
-func WithInterval(interval time.Duration) Option {
-	return func(c *tokenBucketConfig) {
-		c.interval = interval
-	}
-}
-
-// NewTokenBucket return token bucket.
-// rateLimit is a variable that tokens will be added per `interval`.
-// bucketSize is a variable that maximum tokens to store bucket.
-// `interval` is 60 second by default.
-func NewTokenBucket(rateLimit, bucketSize int64, opts ...Option) (*TokenBucket, error) {
-	config := &tokenBucketConfig{
-		interval: 60 * time.Second,
-	}
-	for _, opt := range opts {
-		opt(config)
-	}
-
-	if rateLimit <= 0 {
-		return nil, errInvalidRateLimitArg
-	}
-
-	if rateLimit*2 > bucketSize {
-		return nil, errInvalidRateLimitBucketSize
-	}
-
-	maxRate := 500 * config.interval.Seconds()
-	numofShards := int64(math.Ceil(float64(bucketSize) / maxRate))
-	baseTokens := distribute(rateLimit, numofShards)
-	burstTokens := distribute(bucketSize, numofShards)
-	b := &TokenBucket{
-		numOfShards: numofShards,
-		baseTokens:  baseTokens,
-		burstTokens: burstTokens,
-		config:      config,
-	}
-	return b, nil
-}
-
-func (b *TokenBucket) makeShards() []int64 {
-	shardIDs := make([]int64, b.numOfShards)
-	for i := int64(0); i < b.numOfShards; i++ {
-		shardIDs[i] = i
-	}
-	return shardIDs
-}
-
-func distribute(token, numOfShard int64) []int64 {
-	base := token / numOfShard
-	extra := token % numOfShard
-	shards := make([]int64, 0, numOfShard)
-	for i := int64(0); i < numOfShard; i++ {
-		add := int64(0)
-		if i < extra {
-			add = 1
-		}
-		shards = append(shards, base+add)
-	}
-	return shards
+//go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
+type LimitPreparer interface {
+	Limiter
+	Preparer
 }
 
 type Limiter interface {
@@ -102,18 +35,21 @@ type Preparer interface {
 	PrepareTokens(context.Context, string) error
 }
 
-//go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
-type LimitPreparer interface {
-	Limiter
-	Preparer
+type DDBClient interface {
+	UpdateItem(
+		context.Context,
+		*dynamodb.UpdateItemInput,
+		...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	GetItem(context.Context,
+		*dynamodb.GetItemInput,
+		...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
+	BatchWriteItem(context.Context,
+		*dynamodb.BatchWriteItemInput,
+		...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 }
 
-var (
-	_ LimitPreparer = &RateLimit{}
-)
-
 type RateLimit struct {
-	client    *dynamodb.Client
+	client    DDBClient
 	bucket    *TokenBucket
 	tableName string
 }
@@ -126,7 +62,7 @@ type ddbItem struct {
 	ShardBurstSize int64  `dynamodbav:"shard_burst_size" json:"shard_burst_size"`
 }
 
-func New(table string, bucket *TokenBucket, client *dynamodb.Client) *RateLimit {
+func New(table string, bucket *TokenBucket, client DDBClient) *RateLimit {
 	l := &RateLimit{
 		client:    client,
 		bucket:    bucket,
