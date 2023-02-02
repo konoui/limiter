@@ -91,7 +91,7 @@ func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
 		if err != nil {
 			lc := &Context{
 				Err:    err,
-				Status: http.StatusBadRequest,
+				Status: http.StatusInternalServerError,
 			}
 			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
@@ -101,7 +101,7 @@ func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
 		if err := rl.PrepareTokens(r.Context(), key); err != nil {
 			lc := &Context{
 				Err:    err,
-				Status: http.StatusBadRequest,
+				Status: http.StatusInternalServerError,
 			}
 			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return

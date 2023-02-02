@@ -8,6 +8,9 @@ lint:
 start-local:
 	docker run -d -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb
 
+generate:
+	go generate ./...
+
 test:
 	go test -v ./...
 

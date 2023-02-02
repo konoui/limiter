@@ -93,7 +93,7 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 			t.Errorf("should non throttle: %v", item.TokenCount)
 		}
 
-		// refil base value
+		// refill base value
 		// 0 + base
 		time.Sleep(interval)
 		t.Logf("getToken %v\n", TimeNow().Unix())
@@ -105,7 +105,7 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
-		// refil base value
+		// refill base value
 		// base -1 + base
 		time.Sleep(interval)
 		t.Logf("getToken %v\n", TimeNow().Unix())
@@ -113,12 +113,11 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
-		//
 		if want := burst - 1; token != want {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
-		// refil
+		// refill
 		time.Sleep(interval)
 		t.Logf("getToken %v\n", TimeNow().Unix())
 		token, err = l.getToken(ctx, id, 0)
@@ -132,7 +131,7 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 	})
 }
 
-func TestRateLimit_calculateRefilToken(t *testing.T) {
+func TestRateLimit_calculateRefillToken(t *testing.T) {
 	tests := []struct {
 		name     string
 		want     int64
@@ -142,42 +141,35 @@ func TestRateLimit_calculateRefilToken(t *testing.T) {
 		cur      int64
 	}{
 		{
-			name:     "waitTime<base",
+			name:     "not wait",
 			interval: 2 * time.Second,
 			base:     10,
 			want:     0,
 			wait:     0 * time.Second,
 		},
 		{
-			name:     "waitTime<base",
-			interval: 2 * time.Second,
-			base:     10,
-			want:     0,
-			wait:     0 * time.Second,
-		},
-		{
-			name:     "waitTime>base",
+			name:     "waiting an interval add one base",
 			interval: 2 * time.Second,
 			base:     10,
 			want:     10,
 			wait:     2 * time.Second,
 		},
 		{
-			name:     "waitTime>base",
+			name:     "waiting an interval and half add one base",
 			interval: 2 * time.Second,
 			base:     10,
 			want:     10,
 			wait:     3 * time.Second,
 		},
 		{
-			name:     "waitTime>base and cap by burst",
+			name:     "waiting some intervals add to bucket size",
 			interval: 2 * time.Second,
 			base:     10,
 			want:     20,
 			wait:     40 * time.Second,
 		},
 		{
-			name:     "current 1 and wait to add a base",
+			name:     "current 1 and waiting interval add one base",
 			interval: 2 * time.Second,
 			base:     10,
 			cur:      1,
@@ -185,7 +177,7 @@ func TestRateLimit_calculateRefilToken(t *testing.T) {
 			wait:     2 * time.Second,
 		},
 		{
-			name:     "current 1 and wait to burst cap",
+			name:     "current 1 and waiting some interval add bucket size -1",
 			interval: 2 * time.Second,
 			base:     10,
 			cur:      1,
@@ -213,7 +205,7 @@ func TestRateLimit_calculateRefilToken(t *testing.T) {
 			}, now)
 
 			if got != tt.want {
-				t.Errorf("RateLimit.calculateRefilToken() = %v, want %v", got, tt.want)
+				t.Errorf("RateLimit.calculateRefillToken() = %v, want %v", got, tt.want)
 			}
 		})
 	}

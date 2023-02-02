@@ -102,9 +102,14 @@ type Preparer interface {
 	PrepareTokens(context.Context, string) error
 }
 
+//go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
+type LimitPreparer interface {
+	Limiter
+	Preparer
+}
+
 var (
-	_ Limiter  = &RateLimit{}
-	_ Preparer = &RateLimit{}
+	_ LimitPreparer = &RateLimit{}
 )
 
 type RateLimit struct {
