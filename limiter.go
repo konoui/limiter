@@ -99,12 +99,12 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	switch {
 	case refillTokenCount > 0:
 		// store subtracted token as a token will be used for get-token
-		_, err = l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
+		err := l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
 		// available token are current token count + refill token count
 		// TODO if error occurs, return token or token + refillTokenCount
 		return token + refillTokenCount, err
 	case token > 0:
-		_, err = l.subtractToken(ctx, bucketID, shardID, now)
+		err := l.subtractToken(ctx, bucketID, shardID, now)
 		return token, err
 	default:
 		return 0, nil
@@ -144,7 +144,7 @@ func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 }
 
 func (l *RateLimit) refillToken(ctx context.Context,
-	bucketID string, shardID, shardBurstSize, refillTokenCount, now int64) (int64, error) {
+	bucketID string, shardID, shardBurstSize, refillTokenCount, now int64) error {
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
 	condUpdated := expression.Name("last_updated").
 		LessThan(
@@ -164,7 +164,7 @@ func (l *RateLimit) refillToken(ctx context.Context,
 		)
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
-		return 0, fmt.Errorf("refill build: %w", err)
+		return fmt.Errorf("refill build: %w", err)
 	}
 	input := &dynamodb.UpdateItemInput{
 		TableName:                 &l.tableName,
@@ -175,18 +175,14 @@ func (l *RateLimit) refillToken(ctx context.Context,
 		ConditionExpression:       expr.Condition(),
 		ReturnValues:              types.ReturnValueNone,
 	}
-	resp, err := l.client.UpdateItem(ctx, input)
-	if err != nil {
-		return 0, fmt.Errorf("refill-token: %w", err)
+
+	if _, err := l.client.UpdateItem(ctx, input); err != nil {
+		return fmt.Errorf("refill-token: %w", err)
 	}
-	item := new(ddbItem)
-	if err := attributevalue.UnmarshalMap(resp.Attributes, item); err != nil {
-		return 0, err
-	}
-	return item.TokenCount, nil
+	return nil
 }
 
-func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID, now int64) (int64, error) {
+func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID, now int64) error {
 	// "token_count > :min_val"
 	condExpr := expression.Name("token_count").GreaterThan(expression.Value(0))
 	// "SET last_updated = :now ADD token_count :mod"
@@ -199,7 +195,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		)
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
-		return 0, fmt.Errorf("subtract build: %w", err)
+		return fmt.Errorf("subtract build: %w", err)
 	}
 	input := &dynamodb.UpdateItemInput{
 		Key:                       buildKey(bucketID, shardID),
@@ -211,17 +207,12 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		ReturnValues:              types.ReturnValueNone,
 	}
 
-	resp, err := l.client.UpdateItem(ctx, input)
-	if err != nil {
+	if _, err := l.client.UpdateItem(ctx, input); err != nil {
 		// ConditionalCheckFailedException will occur when token_count equals to zero.
 		// No handling the error here
-		return 0, fmt.Errorf("subtract-item: %w", err)
+		return fmt.Errorf("subtract-item: %w", err)
 	}
-	item := new(ddbItem)
-	if err := attributevalue.UnmarshalMap(resp.Attributes, item); err != nil {
-		return 0, err
-	}
-	return item.TokenCount, nil
+	return nil
 }
 
 func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err error) {
