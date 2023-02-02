@@ -47,6 +47,12 @@ func testRateLimit(t *testing.T, b *TokenBucket) *RateLimit {
 	return l
 }
 
+func mynow(add time.Duration) func() time.Time {
+	return func() time.Time {
+		return time.Unix(1000000000+int64(add.Seconds()), 0)
+	}
+}
+
 func TestRateLimit_ShouldThrottle(t *testing.T) {
 	t.Run("zero", func(t *testing.T) {
 		_, err := NewTokenBucket(0, 0)
@@ -56,6 +62,8 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 	})
 
 	t.Run("throttle", func(t *testing.T) {
+		t.Cleanup(func() { TimeNow = time.Now })
+
 		ctx := context.Background()
 		base := int64(2)
 		burst := base * 2
@@ -69,6 +77,8 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 
 		id := int64String(int64(pickIndex(100000)))
 
+		// base time
+		TimeNow = mynow(0)
 		if err := l.PrepareTokens(ctx, id); err != nil {
 			t.Fatal(err)
 		}
@@ -93,9 +103,9 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 			t.Errorf("should non throttle: %v", item.TokenCount)
 		}
 
-		// refill base value
+		// wait interval and refill base value
 		// 0 + base
-		time.Sleep(interval)
+		TimeNow = mynow(interval)
 		t.Logf("getToken %v\n", TimeNow().Unix())
 		token, err := l.getToken(ctx, id, 0)
 		if err != nil {
@@ -105,9 +115,9 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
-		// refill base value
+		// wait interval and refill base value
 		// base -1 + base
-		time.Sleep(interval)
+		TimeNow = mynow(interval + interval)
 		t.Logf("getToken %v\n", TimeNow().Unix())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
@@ -117,8 +127,8 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
-		// refill
-		time.Sleep(interval)
+		// wait interval and refill
+		TimeNow = mynow(interval + interval + interval)
 		t.Logf("getToken %v\n", TimeNow().Unix())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
@@ -127,7 +137,6 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 		if want := burst; token != want {
 			t.Errorf("want %d but got %d", want, token)
 		}
-
 	})
 }
 
