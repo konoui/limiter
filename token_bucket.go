@@ -73,13 +73,13 @@ func (b *TokenBucket) makeShards() []int64 {
 func distribute(token, numOfShard int64) []int64 {
 	base := token / numOfShard
 	extra := token % numOfShard
-	shards := make([]int64, 0, numOfShard)
+	shards := make([]int64, numOfShard)
 	for i := int64(0); i < numOfShard; i++ {
 		add := int64(0)
 		if i < extra {
 			add = 1
 		}
-		shards = append(shards, base+add)
+		shards[i] = base + add
 	}
 	return shards
 }

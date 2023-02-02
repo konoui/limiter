@@ -35,19 +35,6 @@ type Preparer interface {
 	PrepareTokens(context.Context, string) error
 }
 
-type DDBClient interface {
-	UpdateItem(
-		context.Context,
-		*dynamodb.UpdateItemInput,
-		...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
-	GetItem(context.Context,
-		*dynamodb.GetItemInput,
-		...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
-	BatchWriteItem(context.Context,
-		*dynamodb.BatchWriteItemInput,
-		...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
-}
-
 type RateLimit struct {
 	client    DDBClient
 	bucket    *TokenBucket
@@ -64,7 +51,7 @@ type ddbItem struct {
 
 func New(table string, bucket *TokenBucket, client DDBClient) *RateLimit {
 	l := &RateLimit{
-		client:    client,
+		client:    newWrapDDBClient(client),
 		bucket:    bucket,
 		tableName: table,
 	}
@@ -72,11 +59,12 @@ func New(table string, bucket *TokenBucket, client DDBClient) *RateLimit {
 }
 
 func pickIndex(min int) int {
-	rand.Seed(TimeNow().UnixNano())
 	i := rand.Intn(min) //nolint:gosec,gocritic
 	return i
 }
 
+// ShouldThrottle return throttle and error. If throttle is true, it means tokens run out.
+// If an error is ErrRateLimitExceeded, DynamoDB API rate limit exceeded.
 func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, error) {
 	shardIDs := l.bucket.makeShards()
 	// bucket size is zero
@@ -91,18 +79,15 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
 	token, err := l.getToken(ctx, bucketID, shardID)
-	if err != nil {
-		// TODO logging or telling message to caller
-		var le *types.LimitExceededException
-		if errors.As(err, &le) {
-			return true, nil
-		}
-		return true, err
-	}
 	throttle := token <= 0
-	return throttle, nil
+	// ignore ConditionalCheckFailed
+	if isErrConditionalCheckFailed(err) {
+		return throttle, nil
+	}
+	return throttle, err
 }
 
+// getToken return available tokens. it will tell dynamodb errors to caller.
 func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64) (int64, error) {
 	item, err := l.getItem(ctx, bucketID, shardID)
 	if err != nil {
@@ -110,25 +95,20 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	}
 	now := TimeNow().Unix()
 	token := item.TokenCount
-	var retErr error
 	refillTokenCount := l.calculateRefillToken(item, now)
-	if refillTokenCount > 0 {
+	switch {
+	case refillTokenCount > 0:
 		// store subtracted token as a token will be used for get-token
-		_, retErr = l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
-		if retErr == nil {
-			// available token are current token count + refill token count
-			return token + refillTokenCount, nil
-		}
-	} else if token > 0 {
-		_, retErr = l.subtractToken(ctx, bucketID, shardID, now)
+		_, err = l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
+		// available token are current token count + refill token count
+		// TODO if error occurs, return token or token + refillTokenCount
+		return token + refillTokenCount, err
+	case token > 0:
+		_, err = l.subtractToken(ctx, bucketID, shardID, now)
+		return token, err
+	default:
+		return 0, nil
 	}
-	// TODO
-	var chf *types.ConditionalCheckFailedException
-	var le *types.LimitExceededException
-	if errors.As(retErr, &chf) || errors.As(retErr, &le) {
-		return token, nil
-	}
-	return token, err
 }
 
 func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64) (*ddbItem, error) {
@@ -138,11 +118,11 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 	}
 	resp, err := l.client.GetItem(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get-item: %w", err)
+		return nil, fmt.Errorf("get-item: %w", err)
 	}
 	// check registered token or not
 	if len(resp.Item) == 0 {
-		return nil, fmt.Errorf("invalid token %s", bucketID)
+		return nil, fmt.Errorf("bucket ID: %s: %w", bucketID, ErrInvalidBucketID)
 	}
 
 	item := new(ddbItem)
@@ -184,7 +164,7 @@ func (l *RateLimit) refillToken(ctx context.Context,
 		)
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
-		return 0, fmt.Errorf("failed to build: %w", err)
+		return 0, fmt.Errorf("refill build: %w", err)
 	}
 	input := &dynamodb.UpdateItemInput{
 		TableName:                 &l.tableName,
@@ -193,11 +173,11 @@ func (l *RateLimit) refillToken(ctx context.Context,
 		ExpressionAttributeValues: expr.Values(),
 		UpdateExpression:          expr.Update(),
 		ConditionExpression:       expr.Condition(),
-		ReturnValues:              types.ReturnValueAllNew,
+		ReturnValues:              types.ReturnValueNone,
 	}
 	resp, err := l.client.UpdateItem(ctx, input)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("refill-token: %w", err)
 	}
 	item := new(ddbItem)
 	if err := attributevalue.UnmarshalMap(resp.Attributes, item); err != nil {
@@ -219,7 +199,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		)
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
-		return 0, fmt.Errorf("failed to build: %w", err)
+		return 0, fmt.Errorf("subtract build: %w", err)
 	}
 	input := &dynamodb.UpdateItemInput{
 		Key:                       buildKey(bucketID, shardID),
@@ -228,15 +208,14 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		ExpressionAttributeValues: expr.Values(),
 		UpdateExpression:          expr.Update(),
 		ConditionExpression:       expr.Condition(),
-		ReturnValues:              types.ReturnValueAllNew,
+		ReturnValues:              types.ReturnValueNone,
 	}
 
 	resp, err := l.client.UpdateItem(ctx, input)
 	if err != nil {
-		// ConditionalCheckFailedException will occur when token_count equals zero
-		// no handling the error
-		// TODO
-		return 0, err
+		// ConditionalCheckFailedException will occur when token_count equals to zero.
+		// No handling the error here
+		return 0, fmt.Errorf("subtract-item: %w", err)
 	}
 	item := new(ddbItem)
 	if err := attributevalue.UnmarshalMap(resp.Attributes, item); err != nil {
@@ -245,7 +224,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 	return item.TokenCount, nil
 }
 
-func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
+func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err error) {
 	shards := l.bucket.makeShards()
 	now := TimeNow().Unix()
 	batchSize := 25
@@ -272,12 +251,10 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 		}
 		attrs, err := attributevalue.MarshalMap(item)
 		if err != nil {
-			return err
+			return fmt.Errorf("prepare build: %w", err)
 		}
 		req := types.WriteRequest{
-			PutRequest: &types.PutRequest{
-				Item: attrs,
-			},
+			PutRequest: &types.PutRequest{Item: attrs},
 		}
 		requests = append(requests, req)
 	}
@@ -287,8 +264,12 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 			l.tableName: requests,
 		},
 	}
+
 	_, err := l.client.BatchWriteItem(ctx, input)
-	return err
+	if err != nil {
+		return fmt.Errorf("prepare-tokens: %w", err)
+	}
+	return nil
 }
 
 func int64String(v int64) string {
