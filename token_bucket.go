@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const DefaultInterval = 60
+
 type TokenBucket struct {
 	// numOfShards presents number of shard
 	numOfShards int64
@@ -27,13 +29,13 @@ func WithInterval(interval time.Duration) Option {
 	}
 }
 
-// NewTokenBucket return token bucket.
+// NewTokenBucket return a token bucket instance.
 // rateLimit is a variable that tokens will be added per `interval`.
-// bucketSize is a variable that maximum tokens to store bucket.
+// bucketSize is a variable that maximum number of tokens to store bucket.
 // `interval` is 60 second by default.
 func NewTokenBucket(rateLimit, bucketSize int64, opts ...Option) (*TokenBucket, error) {
 	config := &tokenBucketConfig{
-		interval: 60 * time.Second,
+		interval: DefaultInterval * time.Second,
 	}
 	for _, opt := range opts {
 		opt(config)
