@@ -50,11 +50,11 @@ func NewTokenBucket(rateLimit, bucketSize int64, opts ...Option) (*TokenBucket, 
 	}
 
 	maxRate := 500 * config.interval.Seconds()
-	numofShards := int64(math.Ceil(float64(bucketSize) / maxRate))
-	baseTokens := distribute(rateLimit, numofShards)
-	burstTokens := distribute(bucketSize, numofShards)
+	numOfShards := int64(math.Ceil(float64(bucketSize) / maxRate))
+	baseTokens := distribute(rateLimit, numOfShards)
+	burstTokens := distribute(bucketSize, numOfShards)
 	b := &TokenBucket{
-		numOfShards: numofShards,
+		numOfShards: numOfShards,
 		baseTokens:  baseTokens,
 		burstTokens: burstTokens,
 		config:      config,

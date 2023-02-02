@@ -13,6 +13,9 @@ generate:
 
 test:
 	go test -v ./...
+	
+build:
+	go build -o cmd ./cmd
 
 cover:
 	go test -coverprofile=cover.out ./...

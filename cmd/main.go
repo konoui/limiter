@@ -47,25 +47,25 @@ func NewCreateTableCmd(c *dynamodb.Client) *cobra.Command {
 }
 
 func NewCreateToken(c *dynamodb.Client) *cobra.Command {
-	var bucketSize int64
-	var burstSize int64 = -1
-	var rate int
+	var bucketSize int64 = -1
+	var rateLimit int64
+	var interval int
 	var tableName string
 	cmd := &cobra.Command{
 		Use:  "create-token",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bucket, err := limiter.NewTokenBucket(
+				rateLimit,
 				bucketSize,
-				burstSize,
-				limiter.WithInterval(time.Duration(rate)*time.Second),
+				limiter.WithInterval(time.Duration(interval)*time.Second),
 			)
 			if err != nil {
 				return err
 			}
 
-			if burstSize != -1 {
-				burstSize = bucketSize * 2
+			if bucketSize != -1 {
+				bucketSize = rateLimit * 2
 			}
 
 			rl := limiter.New(tableName, bucket, c)
@@ -83,34 +83,34 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 		},
 	}
 	cmd.PersistentFlags().StringVar(&tableName, "table-name", "", "dynamodb table name")
-	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", 0, "token bucket size")
-	cmd.PersistentFlags().IntVar(&rate, "rate", 1, "rate/second")
-	cmd.PersistentFlags().Int64Var(&burstSize, "bucket-burst-size", burstSize, "token bucket burst size")
+	cmd.PersistentFlags().Int64Var(&rateLimit, "rate-limit", 0, "token bucket size")
+	cmd.PersistentFlags().IntVar(&interval, "interval", limiter.DefaultInterval, "interval to add tokens to a bucket")
+	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", bucketSize, "token bucket burst size")
 	_ = cmd.MarkPersistentFlagRequired("table-name")
-	_ = cmd.MarkPersistentFlagRequired("bucket-size")
+	_ = cmd.MarkPersistentFlagRequired("rate-limit")
 	return cmd
 }
 
 func NewStartServer(c *dynamodb.Client) *cobra.Command {
-	var bucketSize int64
-	var burstSize int64 = -1
-	var rate int
+	var bucketSize int64 = -1
+	var rateLimit int64
+	var interval int
 	var tableName string
 	cmd := &cobra.Command{
 		Use:  "start-server",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bucket, err := limiter.NewTokenBucket(
+				rateLimit,
 				bucketSize,
-				burstSize,
-				limiter.WithInterval(time.Duration(rate)*time.Second),
+				limiter.WithInterval(time.Duration(interval)*time.Second),
 			)
 			if err != nil {
 				return err
 			}
 
-			if burstSize != -1 {
-				burstSize = bucketSize * 2
+			if bucketSize != -1 {
+				bucketSize = rateLimit * 2
 			}
 
 			rl := limiter.New(tableName, bucket, c)
@@ -121,11 +121,11 @@ func NewStartServer(c *dynamodb.Client) *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&tableName, "table-name", "", "dynamodb table name")
-	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", 0, "token bucket size")
-	cmd.PersistentFlags().IntVar(&rate, "rate", 1, "rate/second")
-	cmd.PersistentFlags().Int64Var(&burstSize, "bucket-burst-size", burstSize, "token bucket burst size")
+	cmd.PersistentFlags().Int64Var(&rateLimit, "rate-limit", 0, "token bucket size")
+	cmd.PersistentFlags().IntVar(&interval, "interval", limiter.DefaultInterval, "interval to add tokens to a bucket")
+	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", bucketSize, "token bucket burst size")
 	_ = cmd.MarkPersistentFlagRequired("table-name")
-	_ = cmd.MarkPersistentFlagRequired("bucket-size")
+	_ = cmd.MarkPersistentFlagRequired("rate-limit")
 	return cmd
 }
 
