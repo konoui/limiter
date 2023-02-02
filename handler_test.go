@@ -54,6 +54,16 @@ func Test_Handler(t *testing.T) {
 			msg:    "ok",
 		},
 		{
+			name:   "header key is empty",
+			mocker: func(rl *mock.MockLimitPreparer) {},
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				return req
+			},
+			status: http.StatusBadRequest,
+			msg:    fmt.Sprintf("%s header is empty", headerKey),
+		},
+		{
 			name: "throttle return throttle",
 			mocker: func(rl *mock.MockLimitPreparer) {
 				rl.EXPECT().
