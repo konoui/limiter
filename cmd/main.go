@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/google/uuid"
 	"github.com/konoui/limiter"
@@ -129,6 +130,40 @@ func NewStartServer(c *dynamodb.Client) *cobra.Command {
 	return cmd
 }
 
+func NewPublishMetric() *cobra.Command {
+	var logGroupName, logStreamName string
+	cmd := &cobra.Command{
+		Use:  "publish-metric",
+		Args: cobra.MinimumNArgs(0),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := newCWLClient(cmd.Context())
+			if err != nil {
+				return err
+			}
+			_, _ = c.CreateLogGroup(cmd.Context(), &cloudwatchlogs.CreateLogGroupInput{
+				LogGroupName: &logGroupName,
+			})
+			_, _ = c.CreateLogStream(cmd.Context(), &cloudwatchlogs.CreateLogStreamInput{
+				LogGroupName:  &logGroupName,
+				LogStreamName: &logStreamName,
+			})
+			err = ReadAndPublish(cmd.Context(), cmd.InOrStdin(), c, logGroupName, logStreamName)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "published")
+			return nil
+		},
+		SilenceUsage:       true,
+		DisableSuggestions: true,
+	}
+	cmd.PersistentFlags().StringVar(&logGroupName, "log-group-name", "", "log group name")
+	cmd.PersistentFlags().StringVar(&logStreamName, "log-stream-name", "", "log stream name")
+	_ = cmd.MarkPersistentFlagRequired("log-group-name")
+	_ = cmd.MarkPersistentFlagRequired("log-stream-name")
+	return cmd
+}
+
 func main() {
 	c, err := newDDBClient(context.Background())
 	if err != nil {
@@ -141,6 +176,7 @@ func main() {
 		NewCreateTableCmd(c),
 		NewCreateToken(c),
 		NewStartServer(c),
+		NewPublishMetric(),
 	)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

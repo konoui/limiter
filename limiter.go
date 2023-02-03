@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"strconv"
@@ -13,12 +14,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/google/uuid"
 )
 
 var (
 	// TimeNow is global variable for mock
-	TimeNow               = time.Now
-	_       LimitPreparer = &RateLimit{}
+	timeNow                     = time.Now
+	uuidNewRandom               = uuid.NewRandom
+	_             LimitPreparer = &RateLimit{}
 )
 
 //go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
@@ -39,6 +42,7 @@ type RateLimit struct {
 	client    DDBClient
 	bucket    *TokenBucket
 	tableName string
+	metricOut io.Writer
 }
 
 type ddbItem struct {
@@ -49,12 +53,27 @@ type ddbItem struct {
 	ShardBurstSize int64  `dynamodbav:"shard_burst_size" json:"shard_burst_size"`
 }
 
-func New(table string, bucket *TokenBucket, client DDBClient) *RateLimit {
+type LimiterOpt func(rl *RateLimit)
+
+func WithEMFMetrics(w io.Writer) LimiterOpt {
+	return func(rl *RateLimit) {
+		rl.metricOut = w
+	}
+}
+
+func New(table string, bucket *TokenBucket, client DDBClient, opts ...LimiterOpt) *RateLimit {
 	l := &RateLimit{
-		client:    newWrapDDBClient(client),
 		bucket:    bucket,
 		tableName: table,
+		metricOut: io.Discard,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(l)
+		}
+	}
+
+	l.client = newWrapDDBClient(client, l.metricOut)
 	return l
 }
 
@@ -80,6 +99,11 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
 	token, err := l.getToken(ctx, bucketID, shardID)
 	throttle := token <= 0
+	// Note ignore invalid bucket id
+	// other errors will be caught here
+	if throttle && !errors.Is(err, ErrInvalidBucketID) {
+		outputLog(l.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
+	}
 	// ignore ConditionalCheckFailed
 	if isErrConditionalCheckFailed(err) {
 		return throttle, nil
@@ -93,7 +117,7 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	if err != nil {
 		return 0, err
 	}
-	now := TimeNow().Unix()
+	now := timeNow().Unix()
 	token := item.TokenCount
 	refillTokenCount := l.calculateRefillToken(item, now)
 	switch {
@@ -217,7 +241,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 
 func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err error) {
 	shards := l.bucket.makeShards()
-	now := TimeNow().Unix()
+	now := timeNow().Unix()
 	batchSize := 25
 	for i := 0; i < len(shards); i += batchSize {
 		if len(shards) < batchSize+i {

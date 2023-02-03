@@ -1,8 +1,11 @@
 package limiter
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/golang/mock/gomock"
+	"github.com/google/uuid"
 	mock "github.com/konoui/limiter/mock_limiter"
 )
 
@@ -52,7 +56,17 @@ func testRateLimit(t *testing.T, b *TokenBucket) *RateLimit {
 	return l
 }
 
-func mynow(add time.Duration) func() time.Time {
+func myUUIDNewRandom(t *testing.T) func() (uuid.UUID, error) {
+	return func() (uuid.UUID, error) {
+		id, err := uuid.Parse("fd8107dc-686b-4c62-95e6-070c490a002f")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id, nil
+	}
+}
+
+func myNow(add time.Duration) func() time.Time {
 	return func() time.Time {
 		return time.Unix(1000000000+int64(add.Seconds()), 0)
 	}
@@ -72,10 +86,11 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 	interval := 3 * time.Second
 
 	tests := []struct {
-		name     string
-		mocker   func(client *mock.MockDDBClient)
-		throttle bool
-		err      error
+		name       string
+		mocker     func(client *mock.MockDDBClient)
+		throttle   bool
+		err        error
+		metricFile string
 	}{
 		{
 			name: "throttle when time is not passed and existing token is zero",
@@ -83,13 +98,26 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    TimeNow().Unix(),
+					LastUpdated:    timeNow().Unix(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
 					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
 			},
-			throttle: true,
+			throttle:   true,
+			metricFile: "token-run-out.json",
+		},
+		{
+			name: "invalid bucket id",
+			mocker: func(client *mock.MockDDBClient) {
+				client.EXPECT().
+					GetItem(gomock.Any(), gomock.Any()).
+					// empty item
+					Return(&dynamodb.GetItemOutput{Item: map[string]types.AttributeValue{}}, nil)
+			},
+			throttle:   true,
+			metricFile: "empty-result.json",
+			err:        ErrInvalidBucketID,
 		},
 		{
 			name: "not throttle when time is passed",
@@ -97,7 +125,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    TimeNow().Unix() - int64(interval.Seconds()),
+					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -116,8 +144,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					GetItem(gomock.Any(), gomock.Any()).
 					Return(nil, &types.LimitExceededException{Message: &msg})
 			},
-			throttle: true,
-			err:      ErrRateLimitExceeded,
+			throttle:   true,
+			err:        ErrRateLimitExceeded,
+			metricFile: "get-item-rate-limit-exceeded.json",
 		},
 		{
 			name: "if updateItem return rate limit exceeded then non throttling as time is passed",
@@ -126,7 +155,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    TimeNow().Unix() - int64(interval.Seconds()),
+					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -135,8 +164,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					UpdateItem(gomock.Any(), gomock.Any()).
 					Return(nil, &types.LimitExceededException{Message: &msg})
 			},
-			throttle: false,
-			err:      ErrRateLimitExceeded,
+			throttle:   false,
+			err:        ErrRateLimitExceeded,
+			metricFile: "update-item-rate-limit-exceeded.json",
 		},
 		{
 			name: "1. updateItem of refillToken return ConditionalCheckFailed then ignore error.",
@@ -145,7 +175,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    TimeNow().Unix() - int64(interval.Seconds()),
+					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -164,7 +194,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     1,
 					ShardBurstSize: burst,
-					LastUpdated:    TimeNow().Unix(),
+					LastUpdated:    timeNow().Unix(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -179,8 +209,10 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Cleanup(func() { TimeNow = time.Now })
-			TimeNow = mynow(0)
+			t.Cleanup(func() { timeNow = time.Now })
+			t.Cleanup(func() { uuidNewRandom = uuid.NewRandom })
+			timeNow = myNow(0)
+			uuidNewRandom = myUUIDNewRandom(t)
 
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
@@ -192,13 +224,26 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			rl := New("dummy_table", bucket, client)
+			out := &bytes.Buffer{}
+			rl := New("dummy_table", bucket, client, WithEMFMetrics(out))
 			throttle, err := rl.ShouldThrottle(context.Background(), "dummy")
 			if throttle != tt.throttle {
 				t.Errorf("want: %v, got: %v", tt.throttle, throttle)
 			}
 			if !errors.Is(err, tt.err) {
 				t.Errorf("want: %v, got: %v", err, tt.err)
+			}
+
+			// golden test
+			if tt.throttle || errors.Is(err, ErrRateLimitExceeded) {
+				gotJSON := out.String()
+				if false {
+					writeTestFile(t, gotJSON, tt.metricFile)
+				}
+				wantJSON := readTestFile(t, tt.metricFile)
+				if gotJSON != wantJSON {
+					t.Errorf("want: %s\ngot: %s", wantJSON, gotJSON)
+				}
 			}
 		})
 	}
@@ -213,7 +258,7 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 	})
 
 	t.Run("throttle", func(t *testing.T) {
-		t.Cleanup(func() { TimeNow = time.Now })
+		t.Cleanup(func() { timeNow = time.Now })
 
 		ctx := context.Background()
 		base := int64(2)
@@ -229,7 +274,7 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 		id := int64String(int64(pickIndex(100000)))
 
 		// base time
-		TimeNow = mynow(0)
+		timeNow = myNow(0)
 		if err := l.PrepareTokens(ctx, id); err != nil {
 			t.Fatal(err)
 		}
@@ -256,8 +301,8 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 
 		// wait interval and refill base value
 		// 0 + base
-		TimeNow = mynow(interval)
-		t.Logf("getToken %v\n", TimeNow().Unix())
+		timeNow = myNow(interval)
+		t.Logf("getToken %v\n", timeNow().Unix())
 		token, err := l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
@@ -268,8 +313,8 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 
 		// wait interval and refill base value
 		// base -1 + base
-		TimeNow = mynow(interval + interval)
-		t.Logf("getToken %v\n", TimeNow().Unix())
+		timeNow = myNow(interval + interval)
+		t.Logf("getToken %v\n", timeNow().Unix())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
@@ -279,8 +324,8 @@ func TestRateLimit_ShouldThrottle(t *testing.T) {
 		}
 
 		// wait interval and refill
-		TimeNow = mynow(interval + interval + interval)
-		t.Logf("getToken %v\n", TimeNow().Unix())
+		timeNow = myNow(interval + interval + interval)
+		t.Logf("getToken %v\n", timeNow().Unix())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
@@ -351,7 +396,7 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			now := TimeNow().Unix()
+			now := timeNow().Unix()
 			l := &RateLimit{
 				client:    nil,
 				bucket:    bucket,
@@ -368,5 +413,20 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 				t.Errorf("RateLimit.calculateRefillToken() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func readTestFile(t *testing.T, filename string) string {
+	data, err := os.ReadFile(filepath.Join("testdata", filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func writeTestFile(t *testing.T, data, filename string) {
+	err := os.WriteFile(filepath.Join("testdata", filename), []byte(data), 0660)
+	if err != nil {
+		t.Fatal(err)
 	}
 }

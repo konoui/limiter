@@ -21,9 +21,9 @@ type tokenBucketConfig struct {
 	interval time.Duration
 }
 
-type Option func(t *tokenBucketConfig)
+type TokenBucketOpt func(t *tokenBucketConfig)
 
-func WithInterval(interval time.Duration) Option {
+func WithInterval(interval time.Duration) TokenBucketOpt {
 	return func(c *tokenBucketConfig) {
 		c.interval = interval
 	}
@@ -33,7 +33,7 @@ func WithInterval(interval time.Duration) Option {
 // rateLimit is a variable that tokens will be added per `interval`.
 // bucketSize is a variable that maximum number of tokens to store bucket.
 // `interval` is 60 second by default.
-func NewTokenBucket(rateLimit, bucketSize int64, opts ...Option) (*TokenBucket, error) {
+func NewTokenBucket(rateLimit, bucketSize int64, opts ...TokenBucketOpt) (*TokenBucket, error) {
 	config := &tokenBucketConfig{
 		interval: DefaultInterval * time.Second,
 	}

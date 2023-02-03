@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-
-	"github.com/google/uuid"
 )
 
 type key struct{}
@@ -87,7 +85,7 @@ func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
 			return
 		}
 
-		uid, err := uuid.NewRandom()
+		uid, err := uuidNewRandom()
 		if err != nil {
 			lc := &Context{
 				Err:    err,
