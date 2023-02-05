@@ -53,15 +53,15 @@ type ddbItem struct {
 	ShardBurstSize int64  `dynamodbav:"shard_burst_size" json:"shard_burst_size"`
 }
 
-type LimiterOpt func(rl *RateLimit)
+type Opt func(rl *RateLimit)
 
-func WithEMFMetrics(w io.Writer) LimiterOpt {
+func WithEMFMetrics(w io.Writer) Opt {
 	return func(rl *RateLimit) {
 		rl.metricOut = w
 	}
 }
 
-func New(table string, bucket *TokenBucket, client DDBClient, opts ...LimiterOpt) *RateLimit {
+func New(table string, bucket *TokenBucket, client DDBClient, opts ...Opt) *RateLimit {
 	l := &RateLimit{
 		bucket:    bucket,
 		tableName: table,

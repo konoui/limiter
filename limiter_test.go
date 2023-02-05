@@ -425,7 +425,7 @@ func readTestFile(t *testing.T, filename string) string {
 }
 
 func writeTestFile(t *testing.T, data, filename string) {
-	err := os.WriteFile(filepath.Join("testdata", filename), []byte(data), 0660)
+	err := os.WriteFile(filepath.Join("testdata", filename), []byte(data), 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
