@@ -149,7 +149,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			metricFile: "get-item-rate-limit-exceeded.json",
 		},
 		{
-			name: "if updateItem return rate limit exceeded then non throttling as time is passed",
+			name: "if updateItem return rate limit exceeded then return current token",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -164,16 +164,16 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					UpdateItem(gomock.Any(), gomock.Any()).
 					Return(nil, &types.LimitExceededException{Message: &msg})
 			},
-			throttle:   false,
+			throttle:   true,
 			err:        ErrRateLimitExceeded,
 			metricFile: "update-item-rate-limit-exceeded.json",
 		},
 		{
-			name: "1. updateItem of refillToken return ConditionalCheckFailed then ignore error.",
+			name: "1. updateItem of refillToken return ConditionalCheckFailed then ignore error and return current token.",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
-					TokenCount:     0,
+					TokenCount:     1,
 					ShardBurstSize: burst,
 					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
 				}
@@ -188,7 +188,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:      nil,
 		},
 		{
-			name: "2. updateItem of subtractToken return ConditionalCheckFailed then ignore error",
+			name: "2. updateItem of subtractToken return ConditionalCheckFailed then ignore error return current token",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{

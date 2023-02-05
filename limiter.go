@@ -85,8 +85,12 @@ func pickIndex(min int) int {
 // ShouldThrottle return throttle and error. If throttle is true, it means tokens run out.
 // If an error is ErrRateLimitExceeded, DynamoDB API rate limit exceeded.
 func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, error) {
-	shardIDs := l.bucket.makeShards()
+	if bucketID == "" {
+		return true, ErrInvalidBucketID
+	}
+
 	// bucket size is zero
+	shardIDs := l.bucket.makeShards()
 	if len(shardIDs) == 0 || l.bucket.numOfShards == 0 {
 		return true, nil
 	}
@@ -123,11 +127,15 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	switch {
 	case refillTokenCount > 0:
 		// store subtracted token as a token will be used for get-token
-		err := l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, now)
-		// available token are current token count + refill token count
-		// TODO if error occurs, return token or token + refillTokenCount
-		return token + refillTokenCount, err
+		err := l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, item.LastUpdated, now)
+		if err != nil {
+			// available token are current token count + refill token count
+			// if error occurs, return token for ConditionalCheckFailedException
+			return token, err
+		}
+		return token + refillTokenCount, nil
 	case token > 0:
+		// TODO if ConditionalCheckFailedException, it means token run out, in this case, return zero or token
 		err := l.subtractToken(ctx, bucketID, shardID, now)
 		return token, err
 	default:
@@ -168,16 +176,23 @@ func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 }
 
 func (l *RateLimit) refillToken(ctx context.Context,
-	bucketID string, shardID, shardBurstSize, refillTokenCount, now int64) error {
+	bucketID string, shardID, shardBurstSize, refillTokenCount, lastUpdated, now int64) error {
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
+	// last_updated is equal to last_updated of got item.
+	// it achieve strong write consistency.
+	// other refillToken request is accepted before this, it cause ConditionalCheckFailedException to avoid unexpected refill tokens.
+	// last_update < now
 	condUpdated := expression.Name("last_updated").
-		LessThan(
-			expression.Value(now)).
+		LessThan(expression.Value(now)).
 		And(
+			// last_update == lastUpdated of got item
+			expression.ConditionBuilder(expression.Name("last_updated").
+				Equal(expression.Value(lastUpdated))),
+		).
+		And(
+			// token_count < burst size
 			expression.ConditionBuilder(expression.Name("token_count").
-				LessThan(
-					expression.Value(shardBurstSize),
-				)),
+				LessThanEqual(expression.Value(shardBurstSize))),
 		)
 	condExpr := condNotExist.Or(expression.ConditionBuilder(condUpdated))
 	updateExpr := expression.
@@ -201,6 +216,8 @@ func (l *RateLimit) refillToken(ctx context.Context,
 	}
 
 	if _, err := l.client.UpdateItem(ctx, input); err != nil {
+		// ConditionalCheckFailedException will occur when last_updated is not equal to last_update of got now or less than now.
+		// this will occur when another request already have refilled tokens
 		return fmt.Errorf("refill-token: %w", err)
 	}
 	return nil
@@ -232,7 +249,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 	}
 
 	if _, err := l.client.UpdateItem(ctx, input); err != nil {
-		// ConditionalCheckFailedException will occur when token_count equals to zero.
+		// ConditionalCheckFailedException will occur when token_count equals to zero by other subtract request is accepted.
 		// No handling the error here
 		return fmt.Errorf("subtract-item: %w", err)
 	}
