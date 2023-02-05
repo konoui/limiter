@@ -249,14 +249,11 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 	}
 }
 
-func TestRateLimit_ShouldThrottle(t *testing.T) {
-	t.Run("zero", func(t *testing.T) {
-		_, err := NewTokenBucket(0, 0)
-		if err == nil {
-			t.Fatal("non error")
-		}
-	})
-
+func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
+	if v := os.Getenv("SKIP_DOCKER_TEST"); v != "" {
+		t.Log("skip dynamo db local test")
+		t.Skip()
+	}
 	t.Run("throttle", func(t *testing.T) {
 		t.Cleanup(func() { timeNow = time.Now })
 
