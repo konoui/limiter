@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
@@ -13,7 +15,57 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func NewRootCmd() *cobra.Command {
+const (
+	envRunOnLambda = "RUN_ON_LAMBDA"
+	envTableName   = "TABLE_NAME"
+	envRateLimit   = "RATE_LIMIT"
+	envBucketSize  = "BUCKET_SIZE"
+	envInterval    = "INTERVAL"
+)
+
+func initRateLimit(c *dynamodb.Client) (*limiter.RateLimit, error) {
+	if _, ok := os.LookupEnv(envRunOnLambda); !ok {
+		return nil, nil
+	}
+
+	tableName := os.Getenv(envTableName)
+	if tableName == "" {
+		return nil, errors.New("TABLE_NAME is empty")
+	}
+	rateLimit := os.Getenv(envRateLimit)
+	if rateLimit == "" {
+		return nil, errors.New("RATE_LIMIT is empty")
+	}
+	bucketSize := os.Getenv(envBucketSize)
+	if bucketSize == "" {
+		return nil, errors.New("BUCKET_SIZE is empty")
+	}
+	interval := os.Getenv(envInterval)
+	if interval == "" {
+		return nil, errors.New("INTERVAL is empty")
+	}
+	rl, err := strconv.ParseInt(rateLimit, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	bs, err := strconv.ParseInt(bucketSize, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	in, err := strconv.ParseInt(interval, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
+	b, err := limiter.NewTokenBucket(rl, bs, limiter.WithInterval(time.Duration(in)*time.Second))
+	if err != nil {
+		return nil, err
+	}
+	l := limiter.New(tableName, b, c)
+	return l, nil
+}
+
+func NewRootCmd(rl *limiter.RateLimit) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:  "limiter",
 		Args: cobra.MinimumNArgs(0),
@@ -171,7 +223,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	rootCmd := NewRootCmd()
+	rl, err := initRateLimit(c)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	rootCmd := NewRootCmd(rl)
 	rootCmd.AddCommand(
 		NewCreateTableCmd(c),
 		NewCreateToken(c),

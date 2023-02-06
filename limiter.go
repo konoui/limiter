@@ -104,7 +104,7 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 	token, err := l.getToken(ctx, bucketID, shardID)
 	throttle := token <= 0
 	// Note ignore invalid bucket id
-	// other errors will be caught here
+	// other throttle will be caught here
 	if throttle && !errors.Is(err, ErrInvalidBucketID) {
 		outputLog(l.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
 	}
@@ -121,7 +121,7 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	if err != nil {
 		return 0, err
 	}
-	now := timeNow().Unix()
+	now := timeNow().UnixMilli()
 	token := item.TokenCount
 	refillTokenCount := l.calculateRefillToken(item, now)
 	switch {
@@ -166,7 +166,7 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 }
 
 func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
-	num := math.Floor(float64((now - item.LastUpdated)) / l.bucket.config.interval.Seconds())
+	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.config.interval.Milliseconds()))
 	refill := l.bucket.baseTokens[item.BucketShardID] * int64(num)
 	burstable := item.ShardBurstSize - item.TokenCount
 	if refill > burstable {
@@ -192,7 +192,7 @@ func (l *RateLimit) refillToken(ctx context.Context,
 		And(
 			// token_count < burst size
 			expression.ConditionBuilder(expression.Name("token_count").
-				LessThanEqual(expression.Value(shardBurstSize))),
+				LessThan(expression.Value(shardBurstSize))),
 		)
 	condExpr := condNotExist.Or(expression.ConditionBuilder(condUpdated))
 	updateExpr := expression.
@@ -258,7 +258,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 
 func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err error) {
 	shards := l.bucket.makeShards()
-	now := timeNow().Unix()
+	now := timeNow().UnixMilli()
 	batchSize := 25
 	for i := 0; i < len(shards); i += batchSize {
 		if len(shards) < batchSize+i {

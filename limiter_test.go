@@ -68,7 +68,7 @@ func myUUIDNewRandom(t *testing.T) func() (uuid.UUID, error) {
 
 func myNow(add time.Duration) func() time.Time {
 	return func() time.Time {
-		return time.Unix(1000000000+int64(add.Seconds()), 0)
+		return time.UnixMilli(1000000000 + add.Milliseconds())
 	}
 }
 
@@ -98,7 +98,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Unix(),
+					LastUpdated:    timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -125,7 +125,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
+					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -155,7 +155,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     0,
 					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
+					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -175,7 +175,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     1,
 					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Unix() - int64(interval.Seconds()),
+					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -194,7 +194,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				item := &ddbItem{
 					TokenCount:     1,
 					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Unix(),
+					LastUpdated:    timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -299,7 +299,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		// wait interval and refill base value
 		// 0 + base
 		timeNow = myNow(interval)
-		t.Logf("getToken %v\n", timeNow().Unix())
+		t.Logf("getToken %v\n", timeNow().UnixMilli())
 		token, err := l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
@@ -311,7 +311,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		// wait interval and refill base value
 		// base -1 + base
 		timeNow = myNow(interval + interval)
-		t.Logf("getToken %v\n", timeNow().Unix())
+		t.Logf("getToken %v\n", timeNow().UnixMilli())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
@@ -322,7 +322,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 
 		// wait interval and refill
 		timeNow = myNow(interval + interval + interval)
-		t.Logf("getToken %v\n", timeNow().Unix())
+		t.Logf("getToken %v\n", timeNow().UnixMilli())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
@@ -393,18 +393,18 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			now := timeNow().Unix()
+			now := timeNow()
 			l := &RateLimit{
 				client:    nil,
 				bucket:    bucket,
 				tableName: "dummy",
 			}
 			got := l.calculateRefillToken(&ddbItem{
-				LastUpdated:    now - int64(tt.wait.Seconds()),
+				LastUpdated:    now.Add(-tt.wait).UnixMilli(),
 				ShardBurstSize: tt.base * 2,
 				TokenCount:     tt.cur,
 				BucketShardID:  0,
-			}, now)
+			}, now.UnixMilli())
 
 			if got != tt.want {
 				t.Errorf("RateLimit.calculateRefillToken() = %v, want %v", got, tt.want)

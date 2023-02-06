@@ -19,7 +19,7 @@ test-ci:
 	go test ./...
 	
 build:
-	go build -o cmd ./cmd
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS) -s -w" -o ./bin/mmain ./cmd
 
 cover:
 	go test -coverprofile=cover.out ./...

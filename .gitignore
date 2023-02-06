@@ -1,2 +1,4 @@
 cover.*
 cmd/cmd
+cmd/main
+bin/
