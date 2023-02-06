@@ -129,10 +129,17 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 		// store subtracted token as a token will be used for get-token
 		err := l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, item.LastUpdated, now)
 		if err != nil {
-			// available token are current token count + refill token count
-			// if error occurs, return token for ConditionalCheckFailedException
+			if isErrConditionalCheckFailed(err) {
+				// fallback to subtract, when succeeded, available one token at least.
+				if err := l.subtractToken(ctx, bucketID, shardID, now); err != nil {
+					return token, err
+				}
+				return 1, err
+			}
+			// if error occurs, return current tokens
 			return token, err
 		}
+		// available token are current token count + refill token count
 		return token + refillTokenCount, nil
 	case token > 0:
 		// TODO if ConditionalCheckFailedException, it means token run out, in this case, return zero or token

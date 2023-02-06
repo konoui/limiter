@@ -84,6 +84,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 	base := int64(2)
 	burst := base * 2
 	interval := 3 * time.Second
+	errUnexpected := errors.New("unexpected error")
 
 	tests := []struct {
 		name       string
@@ -169,7 +170,29 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			metricFile: "update-item-rate-limit-exceeded.json",
 		},
 		{
-			name: "1. updateItem of refillToken return ConditionalCheckFailed then ignore error and return current token.",
+			name: "1. updateItem of refillToken return ConditionalCheckFailed then fallback to updateItem of subtractToken and return 1",
+			mocker: func(client *mock.MockDDBClient) {
+				msg := "my error"
+				item := &ddbItem{
+					TokenCount:     0,
+					ShardBurstSize: burst,
+					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
+				}
+				client.EXPECT().
+					GetItem(gomock.Any(), gomock.Any()).
+					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, nil)
+			},
+			throttle: false,
+			err:      nil,
+		},
+		{
+			name: "2. updateItem of refillToken return ConditionalCheckFailed then fallback to updateItem of subtractToken and return current token",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -183,9 +206,12 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
 					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, errUnexpected)
 			},
 			throttle: false,
-			err:      nil,
+			err:      errUnexpected,
 		},
 		{
 			name: "2. updateItem of subtractToken return ConditionalCheckFailed then ignore error return current token",
