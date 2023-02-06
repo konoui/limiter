@@ -214,7 +214,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:      errUnexpected,
 		},
 		{
-			name: "2. updateItem of subtractToken return ConditionalCheckFailed then ignore error return current token",
+			name: "2. updateItem of subtractToken return ConditionalCheckFailed then token run out",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -229,8 +229,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					UpdateItem(gomock.Any(), gomock.Any()).
 					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
 			},
-			throttle: false,
-			err:      nil,
+			throttle:   true,
+			metricFile: "subtract-token-conditional-check-failed.json",
+			err:        nil,
 		},
 	}
 	for _, tt := range tests {

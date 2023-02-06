@@ -142,8 +142,11 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 		// available token are current token count + refill token count
 		return token + refillTokenCount, nil
 	case token > 0:
-		// TODO if ConditionalCheckFailedException, it means token run out, in this case, return zero or token
 		err := l.subtractToken(ctx, bucketID, shardID, now)
+		if isErrConditionalCheckFailed(err) {
+			// if ConditionalCheckFailedException, it means token run out by other request.
+			return 0, err
+		}
 		return token, err
 	default:
 		return 0, nil
