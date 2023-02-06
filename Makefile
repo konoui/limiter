@@ -16,7 +16,7 @@ test:
 	go test ./...
 	
 build:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS) -s -w" -o ./bin/mmain ./cmd
+	CGO_ENABLED=0 GOARCH=arm64 go build -ldflags "$(LDFLAGS) -s -w" -o ./bin/main ./cmd
 
 cover:
 	go test -coverprofile=cover.out ./...

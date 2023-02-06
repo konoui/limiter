@@ -1,7 +1,8 @@
 FROM --platform=arm64 public.ecr.aws/docker/library/golang:latest as build
+ENV GOPROXY=direct
 WORKDIR /usr/src/app
 COPY go.mod go.sum ./
-RUN go mod tidy
+RUN go mod tidy && go mod  download
 COPY . .
 RUN make build
 

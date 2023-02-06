@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
+	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 	"github.com/konoui/limiter"
 )
 
@@ -28,7 +31,7 @@ func start(addr string, rl *limiter.RateLimit, headerKey string) error {
 			}
 
 			if c.Err != nil {
-				fmt.Fprint(w, c.Err.Error())
+				log.Println(c.Err.Error())
 				w.WriteHeader(c.Status)
 				return
 			}
@@ -43,10 +46,15 @@ func start(addr string, rl *limiter.RateLimit, headerKey string) error {
 			fmt.Fprintf(w, "ok")
 		})))
 
-	mux.HandleFunc("/create", limiter.NewPrepareTokenHandler(rl))
-	server := &http.Server{
-		Addr:              addr,
-		ReadHeaderTimeout: 3 * time.Second,
+	if addr != "" {
+		server := &http.Server{
+			Addr:              addr,
+			ReadHeaderTimeout: 3 * time.Second,
+		}
+		return server.ListenAndServe()
 	}
-	return server.ListenAndServe()
+
+	lambda.Start(httpadapter.NewV2(mux).ProxyWithContext)
+	return nil
+
 }

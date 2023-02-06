@@ -10,7 +10,7 @@ Resources:
     Properties:
       PackageType: Image
       Architectures:
-        - x86_64
+      - arm64
       Events:
         hello:
           Type: HttpApi
@@ -24,9 +24,20 @@ Resources:
             Method: POST
       Environment:
         Variables:
-          PARAM1: VALUE
+          TABLE_NAME: test-rate-limit
+          RATE_LIMIT: 20
+          BUCKET_SIZE: 40
+          INTERVAL: 60
+      Policies:
+      - Statement:
+        - Sid: DynamoDBAccess
+          Effect: Allow
+          Action:
+          - dynamodb:BatchWriteItem
+          - dynamodb:GetItem
+          - dynamodb:UpdateItem
+          Resource: '*'
     Metadata:
       DockerTag: go1.x-v1
-      DockerContext: ./app
+      DockerContext: ./
       Dockerfile: Dockerfile
-

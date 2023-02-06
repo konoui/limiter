@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	envRunOnLambda = "RUN_ON_LAMBDA"
+	// https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
+	envRunOnLambda = "AWS_LAMBDA_FUNCTION_NAME"
 	envTableName   = "TABLE_NAME"
 	envRateLimit   = "RATE_LIMIT"
 	envBucketSize  = "BUCKET_SIZE"
@@ -70,7 +71,7 @@ func NewRootCmd(rl *limiter.RateLimit) *cobra.Command {
 		Use:  "limiter",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil
+			return start("", rl, "x-api-key")
 		},
 		SilenceErrors:      true,
 		DisableSuggestions: true,
