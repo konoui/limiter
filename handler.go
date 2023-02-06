@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -26,6 +27,10 @@ func FromContext(ctx context.Context) (*Context, bool) {
 	return v, ok
 }
 
+// NewLimitHandler will handle request rate limit.
+// It provide *Context that includes throttle or not, http status and an error.
+// There is a case that status is ok but context has an error.
+// An error is used as logging.
 func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get(headerKey)
@@ -47,7 +52,16 @@ func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
 				Token:    token,
 				Status:   http.StatusInternalServerError,
 				Err:      err,
-				Throttle: true,
+				Throttle: throttle,
+			}
+			if errors.Is(err, ErrInvalidBucketID) {
+				lc.Status = http.StatusBadRequest
+			} else if errors.Is(err, ErrRateLimitExceeded) {
+				status := http.StatusTooManyRequests
+				if !throttle {
+					status = http.StatusOK
+				}
+				lc.Status = status
 			}
 			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
@@ -97,6 +111,14 @@ func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
 
 		key := uid.String()
 		if err := rl.PrepareTokens(r.Context(), key); err != nil {
+			if errors.Is(err, ErrRateLimitExceeded) {
+				lc := &Context{
+					Err:    err,
+					Status: http.StatusTooManyRequests,
+				}
+				*r = *r.WithContext(NewContext(r.Context(), lc))
+				return
+			}
 			lc := &Context{
 				Err:    err,
 				Status: http.StatusInternalServerError,

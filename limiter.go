@@ -84,6 +84,7 @@ func pickIndex(min int) int {
 
 // ShouldThrottle return throttle and error. If throttle is true, it means tokens run out.
 // If an error is ErrRateLimitExceeded, DynamoDB API rate limit exceeded.
+// there is a case that error is ErrRateLimitExceeded but throttle is false(non throttle).
 func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, error) {
 	if bucketID == "" {
 		return true, ErrInvalidBucketID

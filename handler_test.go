@@ -79,6 +79,36 @@ func Test_Handler(t *testing.T) {
 			msg:    "throttle",
 		},
 		{
+			name: "dynamodb api rate limit error",
+			mocker: func(rl *mock.MockLimitPreparer) {
+				rl.EXPECT().
+					ShouldThrottle(gomock.Any(), gomock.Any()).
+					Return(true, limiter.ErrRateLimitExceeded)
+			},
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.Header.Add(headerKey, "dummy")
+				return req
+			},
+			status: http.StatusTooManyRequests,
+			msg:    limiter.ErrRateLimitExceeded.Error(),
+		},
+		{
+			name: "dynamodb api rate limit error, non throttle",
+			mocker: func(rl *mock.MockLimitPreparer) {
+				rl.EXPECT().
+					ShouldThrottle(gomock.Any(), gomock.Any()).
+					Return(false, limiter.ErrRateLimitExceeded)
+			},
+			req: func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.Header.Add(headerKey, "dummy")
+				return req
+			},
+			status: http.StatusOK,
+			msg:    limiter.ErrRateLimitExceeded.Error(),
+		},
+		{
 			name: "internal server error",
 			mocker: func(rl *mock.MockLimitPreparer) {
 				rl.EXPECT().
