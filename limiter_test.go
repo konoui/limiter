@@ -97,9 +97,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "throttle when time is not passed and existing token is zero",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:     0,
-					ShardBurstSize: burst,
-					LastUpdated:    timeNow().UnixMilli(),
+					TokenCount:         0,
+					BucketSizePerShard: burst,
+					LastUpdated:        timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -124,9 +124,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "not throttle when time is passed",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:     0,
-					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
+					TokenCount:         0,
+					BucketSizePerShard: burst,
+					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -154,9 +154,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
-					TokenCount:     0,
-					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
+					TokenCount:         0,
+					BucketSizePerShard: burst,
+					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -174,9 +174,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
-					TokenCount:     0,
-					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
+					TokenCount:         0,
+					BucketSizePerShard: burst,
+					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -196,9 +196,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
-					TokenCount:     1,
-					ShardBurstSize: burst,
-					LastUpdated:    timeNow().Add(-interval).UnixMilli(),
+					TokenCount:         1,
+					BucketSizePerShard: burst,
+					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -218,9 +218,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
-					TokenCount:     1,
-					ShardBurstSize: burst,
-					LastUpdated:    timeNow().UnixMilli(),
+					TokenCount:         1,
+					BucketSizePerShard: burst,
+					LastUpdated:        timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -427,10 +427,10 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 				tableName: "dummy",
 			}
 			got := l.calculateRefillToken(&ddbItem{
-				LastUpdated:    now.Add(-tt.wait).UnixMilli(),
-				ShardBurstSize: tt.base * 2,
-				TokenCount:     tt.cur,
-				BucketShardID:  0,
+				LastUpdated:        now.Add(-tt.wait).UnixMilli(),
+				BucketSizePerShard: tt.base * 2,
+				TokenCount:         tt.cur,
+				ShardID:            0,
 			}, now.UnixMilli())
 
 			if got != tt.want {

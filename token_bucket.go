@@ -10,11 +10,10 @@ const DefaultInterval = 60
 type TokenBucket struct {
 	// numOfShards presents number of shard
 	numOfShards int64
-	// baseTokens presents rateLimit per shard
-	baseTokens []int64
-	// burstTokens presents bucketSize per shard
-	burstTokens []int64
-	config      *tokenBucketConfig
+	// tokenPerInterval presents rateLimit per shard
+	tokenPerShardPerInterval []int64
+	bucketSizePerShard       []int64
+	config                   *tokenBucketConfig
 }
 
 type tokenBucketConfig struct {
@@ -52,12 +51,12 @@ func NewTokenBucket(rateLimit, bucketSize int64, opts ...TokenBucketOpt) (*Token
 	maxRate := 500 * config.interval.Seconds()
 	numOfShards := int64(math.Ceil(float64(bucketSize) / maxRate))
 	baseTokens := distribute(rateLimit, numOfShards)
-	burstTokens := distribute(bucketSize, numOfShards)
+	bucketSizePerShard := distribute(bucketSize, numOfShards)
 	b := &TokenBucket{
-		numOfShards: numOfShards,
-		baseTokens:  baseTokens,
-		burstTokens: burstTokens,
-		config:      config,
+		numOfShards:              numOfShards,
+		tokenPerShardPerInterval: baseTokens,
+		bucketSizePerShard:       bucketSizePerShard,
+		config:                   config,
 	}
 	return b, nil
 }

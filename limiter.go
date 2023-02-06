@@ -46,11 +46,11 @@ type RateLimit struct {
 }
 
 type ddbItem struct {
-	BucketID       string `dynamodbav:"bucket_id" json:"bucket_id"`
-	BucketShardID  int64  `dynamodbav:"bucket_shard_id" json:"bucket_shard_id"`
-	TokenCount     int64  `dynamodbav:"token_count" json:"token_count"`
-	LastUpdated    int64  `dynamodbav:"last_updated" json:"last_updated"`
-	ShardBurstSize int64  `dynamodbav:"shard_burst_size" json:"shard_burst_size"`
+	BucketID           string `dynamodbav:"bucket_id" json:"bucket_id"`
+	ShardID            int64  `dynamodbav:"shard_id" json:"shard_id"`
+	TokenCount         int64  `dynamodbav:"token_count" json:"token_count"`
+	LastUpdated        int64  `dynamodbav:"last_updated" json:"last_updated"`
+	BucketSizePerShard int64  `dynamodbav:"bucket_size_per_shard" json:"bucket_size_per_shard"`
 }
 
 type Opt func(rl *RateLimit)
@@ -127,7 +127,7 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 	switch {
 	case refillTokenCount > 0:
 		// store subtracted token as a token will be used for get-token
-		err := l.refillToken(ctx, bucketID, shardID, item.ShardBurstSize, refillTokenCount-1, item.LastUpdated, now)
+		err := l.refillToken(ctx, bucketID, shardID, item.BucketSizePerShard, refillTokenCount-1, item.LastUpdated, now)
 		if err != nil {
 			if isErrConditionalCheckFailed(err) {
 				// fallback to subtract, when succeeded, available one token at least.
@@ -177,8 +177,8 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 
 func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.config.interval.Milliseconds()))
-	refill := l.bucket.baseTokens[item.BucketShardID] * int64(num)
-	burstable := item.ShardBurstSize - item.TokenCount
+	refill := l.bucket.tokenPerShardPerInterval[item.ShardID] * int64(num)
+	burstable := item.BucketSizePerShard - item.TokenCount
 	if refill > burstable {
 		return burstable
 	}
@@ -285,11 +285,11 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 	requests := make([]types.WriteRequest, 0, len(shards))
 	for _, shardID := range shards {
 		item := &ddbItem{
-			BucketID:       bucketID,
-			BucketShardID:  shardID,
-			LastUpdated:    now,
-			TokenCount:     l.bucket.burstTokens[shardID],
-			ShardBurstSize: l.bucket.burstTokens[shardID],
+			BucketID:           bucketID,
+			ShardID:            shardID,
+			LastUpdated:        now,
+			TokenCount:         l.bucket.bucketSizePerShard[shardID],
+			BucketSizePerShard: l.bucket.bucketSizePerShard[shardID],
 		}
 		attrs, err := attributevalue.MarshalMap(item)
 		if err != nil {
@@ -323,7 +323,7 @@ func buildKey(bucketID string, shardID int64) map[string]types.AttributeValue {
 		"bucket_id": &types.AttributeValueMemberS{
 			Value: bucketID,
 		},
-		"bucket_shard_id": &types.AttributeValueMemberN{
+		"shard_id": &types.AttributeValueMemberN{
 			Value: int64String(shardID),
 		},
 	}
@@ -331,7 +331,7 @@ func buildKey(bucketID string, shardID int64) map[string]types.AttributeValue {
 
 func CreateTable(ctx context.Context, tableName string, client *dynamodb.Client) error {
 	bucketKey := "bucket_id"
-	bucketShardID := "bucket_shard_id"
+	bucketShardID := "shard_id"
 	input := &dynamodb.CreateTableInput{
 		TableName:   &tableName,
 		BillingMode: types.BillingModePayPerRequest,

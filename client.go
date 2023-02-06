@@ -92,7 +92,7 @@ func getKeys(attr map[string]types.AttributeValue) (bucketID string, shardID str
 	if err != nil {
 		return "", "", fmt.Errorf("handle input: %w", err)
 	}
-	return item.BucketID, int64String(item.BucketShardID), nil
+	return item.BucketID, int64String(item.ShardID), nil
 }
 
 type EMF struct {
