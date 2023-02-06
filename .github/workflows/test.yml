@@ -1,4 +1,4 @@
-name: test and release
+name: test
 
 on:
   push:
@@ -18,4 +18,5 @@ jobs:
         make lint
     - name: test
       run: |
-        make test-ci
+        make start-local
+        make test

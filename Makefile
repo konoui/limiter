@@ -6,16 +6,13 @@ lint:
 	golangci-lint run ./...
 
 start-local:
-	docker run -d -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb
+	docker run -d --name dynamo -p 8000:8000 amazon/dynamodb-local -jar DynamoDBLocal.jar -sharedDb
+	timeout 15 sh -c "until curl -s -o /dev/null -w "%{http_code}" localhost:8000  | grep -q 400; do sleep 1; done"
 
 generate:
 	go generate ./...
 
 test:
-	go test ./...
-
-test-ci: export SKIP_DOCKER_TEST="true"
-test-ci:
 	go test ./...
 	
 build:

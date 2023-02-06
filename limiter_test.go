@@ -21,6 +21,9 @@ import (
 
 func testClient(t *testing.T) *dynamodb.Client {
 	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "123456")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "123456")
+	t.Setenv("AWS_DEFAULT_REGION", "us-east-1")
 	ep := aws.Endpoint{
 		PartitionID:       "aws",
 		URL:               "http://localhost:8000",
