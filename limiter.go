@@ -191,14 +191,9 @@ func (l *RateLimit) refillToken(ctx context.Context,
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
 	// check last_updated is equal to last_updated of got item to achieve strong write consistency.
 	// other refillToken request is accepted before this, it cause ConditionalCheckFailedException to avoid unexpected refill tokens.
-	// last_update < now
+	// last_update == lastUpdated of got item
 	condUpdated := expression.Name("last_updated").
-		LessThan(expression.Value(now)).
-		And(
-			// last_update == lastUpdated of got item
-			expression.ConditionBuilder(expression.Name("last_updated").
-				Equal(expression.Value(lastUpdated))),
-		).
+		Equal(expression.Value(lastUpdated)).
 		And(
 			// token_count < burst size
 			expression.ConditionBuilder(expression.Name("token_count").
