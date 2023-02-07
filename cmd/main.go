@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"strconv"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -17,61 +14,19 @@ import (
 
 const (
 	// https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
-	envRunOnLambda = "AWS_LAMBDA_FUNCTION_NAME"
-	envTableName   = "TABLE_NAME"
-	envRateLimit   = "RATE_LIMIT"
-	envBucketSize  = "BUCKET_SIZE"
-	envInterval    = "INTERVAL"
+	envRunOnLambda    = "AWS_LAMBDA_FUNCTION_NAME"
+	envConfigFilepath = "LIMITER_CONFIG_FILEPATH"
 )
-
-func initRateLimit(c *dynamodb.Client) (*limiter.RateLimit, error) {
-	if _, ok := os.LookupEnv(envRunOnLambda); !ok {
-		return nil, nil
-	}
-
-	tableName := os.Getenv(envTableName)
-	if tableName == "" {
-		return nil, errors.New("TABLE_NAME is empty")
-	}
-	rateLimit := os.Getenv(envRateLimit)
-	if rateLimit == "" {
-		return nil, errors.New("RATE_LIMIT is empty")
-	}
-	bucketSize := os.Getenv(envBucketSize)
-	if bucketSize == "" {
-		return nil, errors.New("BUCKET_SIZE is empty")
-	}
-	interval := os.Getenv(envInterval)
-	if interval == "" {
-		return nil, errors.New("INTERVAL is empty")
-	}
-	rl, err := strconv.ParseInt(rateLimit, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	bs, err := strconv.ParseInt(bucketSize, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	in, err := strconv.ParseInt(interval, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	b, err := limiter.NewTokenBucket(rl, bs, limiter.WithInterval(time.Duration(in)*time.Second))
-	if err != nil {
-		return nil, err
-	}
-	l := limiter.New(tableName, b, c)
-	return l, nil
-}
 
 func NewRootCmd(rl *limiter.RateLimit) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:  "limiter",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return start("", rl, "x-api-key")
+			if rl != nil {
+				return start("", rl, "x-api-key")
+			}
+			return fmt.Errorf("non lambda environment")
 		},
 		SilenceErrors:      true,
 		DisableSuggestions: true,
@@ -101,28 +56,16 @@ func NewCreateTableCmd(c *dynamodb.Client) *cobra.Command {
 }
 
 func NewCreateToken(c *dynamodb.Client) *cobra.Command {
-	var bucketSize int64 = -1
-	var rateLimit int64
-	var interval int
-	var tableName string
+	var filepath string
 	cmd := &cobra.Command{
 		Use:  "create-token",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bucket, err := limiter.NewTokenBucket(
-				rateLimit,
-				bucketSize,
-				limiter.WithInterval(time.Duration(interval)*time.Second),
-			)
+			rl, err := newLimiter(filepath, c)
 			if err != nil {
 				return err
 			}
 
-			if bucketSize != -1 {
-				bucketSize = rateLimit * 2
-			}
-
-			rl := limiter.New(tableName, bucket, c)
 			uid, err := uuid.NewRandom()
 			if err != nil {
 				return err
@@ -136,50 +79,29 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.PersistentFlags().StringVar(&tableName, "table-name", "", "dynamodb table name")
-	cmd.PersistentFlags().Int64Var(&rateLimit, "rate-limit", 0, "token bucket size")
-	cmd.PersistentFlags().IntVar(&interval, "interval", limiter.DefaultInterval, "interval to add tokens to a bucket")
-	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", bucketSize, "token bucket burst size")
-	_ = cmd.MarkPersistentFlagRequired("table-name")
-	_ = cmd.MarkPersistentFlagRequired("rate-limit")
+	cmd.PersistentFlags().StringVar(&filepath, "config-file", "", "config file path")
+	_ = cmd.MarkPersistentFlagRequired("config-file")
 	return cmd
 }
 
 func NewStartServer(c *dynamodb.Client) *cobra.Command {
-	var bucketSize int64 = -1
-	var rateLimit int64
-	var interval int
-	var tableName string
+	var filepath string
 	cmd := &cobra.Command{
 		Use:  "start-server",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			bucket, err := limiter.NewTokenBucket(
-				rateLimit,
-				bucketSize,
-				limiter.WithInterval(time.Duration(interval)*time.Second),
-			)
+			rl, err := newLimiter(filepath, c)
 			if err != nil {
 				return err
 			}
-
-			if bucketSize != -1 {
-				bucketSize = rateLimit * 2
-			}
-
-			rl := limiter.New(tableName, bucket, c)
 			return start(":8080", rl, "x-api-key")
 		},
 		SilenceUsage:       true,
 		DisableSuggestions: true,
 	}
 
-	cmd.PersistentFlags().StringVar(&tableName, "table-name", "", "dynamodb table name")
-	cmd.PersistentFlags().Int64Var(&rateLimit, "rate-limit", 0, "token bucket size")
-	cmd.PersistentFlags().IntVar(&interval, "interval", limiter.DefaultInterval, "interval to add tokens to a bucket")
-	cmd.PersistentFlags().Int64Var(&bucketSize, "bucket-size", bucketSize, "token bucket burst size")
-	_ = cmd.MarkPersistentFlagRequired("table-name")
-	_ = cmd.MarkPersistentFlagRequired("rate-limit")
+	cmd.PersistentFlags().StringVar(&filepath, "config-file", "", "config file path")
+	_ = cmd.MarkPersistentFlagRequired("config-file")
 	return cmd
 }
 
@@ -224,10 +146,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	rl, err := initRateLimit(c)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	var rl *limiter.RateLimit
+	if _, ok := os.LookupEnv(envRunOnLambda); ok {
+		rl, err = newLimiter(os.Getenv(envConfigFilepath), c)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 
 	rootCmd := NewRootCmd(rl)
@@ -241,4 +166,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newLimiter(filepath string, client *dynamodb.Client) (*limiter.RateLimit, error) {
+	f, err := os.Open(filepath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	cfg, err := limiter.NewConfig(f)
+	if err != nil {
+		return nil, err
+	}
+
+	return limiter.New(cfg, client)
 }

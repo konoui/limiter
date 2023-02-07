@@ -61,7 +61,26 @@ func WithEMFMetrics(w io.Writer) Opt {
 	}
 }
 
-func New(table string, bucket *TokenBucket, client DDBClient, opts ...Opt) *RateLimit {
+func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
+	interval := DefaultInterval
+	if cfg.Interval != 0 {
+		interval = cfg.Interval
+	}
+	bucket, err := newTokenBucket(
+		cfg.TokenPerInterval,
+		cfg.BucketSize,
+		interval)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.TableName == "" {
+		return nil, errors.New("table_name of config is empty")
+	}
+	l := newLimiter(cfg.TableName, bucket, client, opts...)
+	return l, nil
+}
+
+func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt) *RateLimit {
 	l := &RateLimit{
 		bucket:    bucket,
 		tableName: table,
@@ -177,7 +196,7 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 }
 
 func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
-	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.config.interval.Milliseconds()))
+	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.interval.Milliseconds()))
 	refill := l.bucket.tokenPerShardPerInterval[item.ShardID] * int64(num)
 	burstable := item.BucketSizePerShard - item.TokenCount
 	if refill > burstable {

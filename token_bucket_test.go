@@ -8,20 +8,20 @@ import (
 
 func Test_NewBucket(t *testing.T) {
 	t.Run("zero", func(t *testing.T) {
-		_, err := NewTokenBucket(0, 0)
+		_, err := newTokenBucket(0, 0, 1*time.Second)
 		if !errors.Is(err, errInvalidRateLimitArg) {
 			t.Fatal("non error")
 		}
 	})
 	t.Run("invalid arg", func(t *testing.T) {
-		_, err := NewTokenBucket(2, 1)
+		_, err := newTokenBucket(2, 1, 1*time.Second)
 		if !errors.Is(err, errInvalidRateLimitBucketSize) {
 			t.Fatal("non error")
 		}
 	})
 
 	t.Run("distribute", func(t *testing.T) {
-		b, err := NewTokenBucket(611, 1300, WithInterval(1*time.Second))
+		b, err := newTokenBucket(611, 1300, 1*time.Second)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

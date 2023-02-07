@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const DefaultInterval = 60
+var DefaultInterval = 60 * time.Second
 
 type TokenBucket struct {
 	// numOfShards presents number of shard
@@ -13,33 +13,14 @@ type TokenBucket struct {
 	// tokenPerInterval presents rateLimit per shard
 	tokenPerShardPerInterval []int64
 	bucketSizePerShard       []int64
-	config                   *tokenBucketConfig
-}
-
-type tokenBucketConfig struct {
-	interval time.Duration
-}
-
-type TokenBucketOpt func(t *tokenBucketConfig)
-
-func WithInterval(interval time.Duration) TokenBucketOpt {
-	return func(c *tokenBucketConfig) {
-		c.interval = interval
-	}
+	interval                 time.Duration
 }
 
 // NewTokenBucket return a token bucket instance.
 // rateLimit is a variable that tokens will be added per `interval`.
 // bucketSize is a variable that maximum number of tokens to store bucket.
 // `interval` is 60 second by default.
-func NewTokenBucket(rateLimit, bucketSize int64, opts ...TokenBucketOpt) (*TokenBucket, error) {
-	config := &tokenBucketConfig{
-		interval: DefaultInterval * time.Second,
-	}
-	for _, opt := range opts {
-		opt(config)
-	}
-
+func newTokenBucket(rateLimit, bucketSize int64, interval time.Duration) (*TokenBucket, error) {
 	if rateLimit <= 0 {
 		return nil, errInvalidRateLimitArg
 	}
@@ -48,7 +29,7 @@ func NewTokenBucket(rateLimit, bucketSize int64, opts ...TokenBucketOpt) (*Token
 		return nil, errInvalidRateLimitBucketSize
 	}
 
-	maxRate := 500 * config.interval.Seconds()
+	maxRate := 500 * interval.Seconds()
 	numOfShards := int64(math.Ceil(float64(bucketSize) / maxRate))
 	baseTokens := distribute(rateLimit, numOfShards)
 	bucketSizePerShard := distribute(bucketSize, numOfShards)
@@ -56,7 +37,7 @@ func NewTokenBucket(rateLimit, bucketSize int64, opts ...TokenBucketOpt) (*Token
 		numOfShards:              numOfShards,
 		tokenPerShardPerInterval: baseTokens,
 		bucketSizePerShard:       bucketSizePerShard,
-		config:                   config,
+		interval:                 interval,
 	}
 	return b, nil
 }

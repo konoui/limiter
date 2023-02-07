@@ -1,0 +1,4 @@
+table_name: "dummy_table"
+token_per_interval: 20
+bucket_size: 40
+interval: 60s

@@ -45,15 +45,18 @@ func testClient(t *testing.T) *dynamodb.Client {
 	return client
 }
 
-func testRateLimit(t *testing.T, b *TokenBucket) *RateLimit {
+func testRateLimit(t *testing.T, cfg *Config) *RateLimit {
 	t.Helper()
 	client := testClient(t)
-	tableName := "test_buckets_table"
-	l := New(tableName,
-		b,
+	cfg.TableName = "test_buckets_table"
+	l, err := New(
+		cfg,
 		client,
 	)
-	if err := CreateTable(context.Background(), tableName, client); err != nil {
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateTable(context.Background(), cfg.TableName, client); err != nil {
 		t.Fatal(err)
 	}
 	return l
@@ -84,9 +87,12 @@ func newAttr(t *testing.T, ddbItem *ddbItem) map[string]types.AttributeValue {
 }
 
 func TestRateLimit_ShouldThrottleMock(t *testing.T) {
-	base := int64(2)
-	burst := base * 2
-	interval := 3 * time.Second
+	cfg := Config{
+		TokenPerInterval: 2,
+		BucketSize:       2 * 2,
+		Interval:         3 * time.Second,
+		TableName:        "dummy_table",
+	}
 	errUnexpected := errors.New("unexpected error")
 
 	tests := []struct {
@@ -101,7 +107,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
 					TokenCount:         0,
-					BucketSizePerShard: burst,
+					BucketSizePerShard: cfg.BucketSize,
 					LastUpdated:        timeNow().UnixMilli(),
 				}
 				client.EXPECT().
@@ -128,8 +134,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
 					TokenCount:         0,
-					BucketSizePerShard: burst,
-					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -158,8 +164,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         0,
-					BucketSizePerShard: burst,
-					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -178,8 +184,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         0,
-					BucketSizePerShard: burst,
-					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -200,8 +206,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         1,
-					BucketSizePerShard: burst,
-					LastUpdated:        timeNow().Add(-interval).UnixMilli(),
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -222,7 +228,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         1,
-					BucketSizePerShard: burst,
+					BucketSizePerShard: cfg.BucketSize,
 					LastUpdated:        timeNow().UnixMilli(),
 				}
 				client.EXPECT().
@@ -249,13 +255,11 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			client := mock.NewMockDDBClient(ctrl)
 			tt.mocker(client)
 
-			bucket, err := NewTokenBucket(base, burst, WithInterval(interval))
+			out := &bytes.Buffer{}
+			rl, err := New(&cfg, client, WithEMFMetrics(out))
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			out := &bytes.Buffer{}
-			rl := New("dummy_table", bucket, client, WithEMFMetrics(out))
 			throttle, err := rl.ShouldThrottle(context.Background(), "dummy")
 			if throttle != tt.throttle {
 				t.Errorf("want: %v, got: %v", tt.throttle, throttle)
@@ -280,23 +284,16 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 }
 
 func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
-	if v := os.Getenv("SKIP_DOCKER_TEST"); v != "" {
-		t.Log("skip dynamo db local test")
-		t.Skip()
-	}
 	t.Run("throttle", func(t *testing.T) {
 		t.Cleanup(func() { timeNow = time.Now })
 
 		ctx := context.Background()
-		base := int64(2)
-		burst := base * 2
-		interval := 3 * time.Second
-		bucket, err := NewTokenBucket(base, burst, WithInterval(interval))
-		if err != nil {
-			t.Fatal(err)
+		cfg := &Config{
+			TokenPerInterval: 2,
+			BucketSize:       2 * 2,
+			Interval:         3 * time.Second,
 		}
-
-		l := testRateLimit(t, bucket)
+		l := testRateLimit(t, cfg)
 
 		id := int64String(int64(pickIndex(100000)))
 
@@ -307,7 +304,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		}
 
 		t.Logf("bucket-id %s\n", id)
-		for i := 0; i < int(burst); i++ {
+		for i := 0; i < int(cfg.BucketSize); i++ {
 			throttled, err := l.ShouldThrottle(ctx, id)
 			if err != nil {
 				t.Errorf("[%d] unexpected throttle error %v", i, err)
@@ -328,36 +325,36 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 
 		// wait interval and refill base value
 		// 0 + base
-		timeNow = myNow(interval)
+		timeNow = myNow(cfg.Interval)
 		t.Logf("getToken %v\n", timeNow().UnixMilli())
 		token, err := l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
-		if want := base; token != want {
+		if want := cfg.TokenPerInterval; token != want {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
 		// wait interval and refill base value
 		// base -1 + base
-		timeNow = myNow(interval + interval)
+		timeNow = myNow(cfg.Interval * 2)
 		t.Logf("getToken %v\n", timeNow().UnixMilli())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
-		if want := burst - 1; token != want {
+		if want := cfg.BucketSize - 1; token != want {
 			t.Errorf("want %d but got %d", want, token)
 		}
 
 		// wait interval and refill
-		timeNow = myNow(interval + interval + interval)
+		timeNow = myNow(cfg.Interval * 3)
 		t.Logf("getToken %v\n", timeNow().UnixMilli())
 		token, err = l.getToken(ctx, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
-		if want := burst; token != want {
+		if want := cfg.BucketSize; token != want {
 			t.Errorf("want %d but got %d", want, token)
 		}
 	})
@@ -419,7 +416,7 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bucket, err := NewTokenBucket(tt.base, tt.base*2, WithInterval(tt.interval))
+			bucket, err := newTokenBucket(tt.base, tt.base*2, tt.interval)
 			if err != nil {
 				t.Fatal(err)
 			}
