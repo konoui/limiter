@@ -39,7 +39,7 @@ func Test_Handler(t *testing.T) {
 		msg    string
 	}{
 		{
-			name: "non throttle return ok",
+			name: "200 and ok msg",
 			mocker: func(rl *mock.MockLimitPreparer) {
 				rl.EXPECT().
 					ShouldThrottle(gomock.Any(), gomock.Any()).
@@ -54,7 +54,7 @@ func Test_Handler(t *testing.T) {
 			msg:    "ok",
 		},
 		{
-			name:   "header key is empty",
+			name:   "400 when header key is empty",
 			mocker: func(rl *mock.MockLimitPreparer) {},
 			req: func() *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -64,7 +64,7 @@ func Test_Handler(t *testing.T) {
 			msg:    fmt.Sprintf("%s header is empty", headerKey),
 		},
 		{
-			name: "throttle return throttle",
+			name: "429 and throttle msg",
 			mocker: func(rl *mock.MockLimitPreparer) {
 				rl.EXPECT().
 					ShouldThrottle(gomock.Any(), gomock.Any()).
@@ -79,7 +79,7 @@ func Test_Handler(t *testing.T) {
 			msg:    "throttle",
 		},
 		{
-			name: "dynamodb api rate limit error",
+			name: "429 when dynamodb api return rate limit error",
 			mocker: func(rl *mock.MockLimitPreparer) {
 				rl.EXPECT().
 					ShouldThrottle(gomock.Any(), gomock.Any()).
@@ -94,7 +94,7 @@ func Test_Handler(t *testing.T) {
 			msg:    limiter.ErrRateLimitExceeded.Error(),
 		},
 		{
-			name: "dynamodb api rate limit error, non throttle",
+			name: "200 when dynamodb api return rate limit error",
 			mocker: func(rl *mock.MockLimitPreparer) {
 				rl.EXPECT().
 					ShouldThrottle(gomock.Any(), gomock.Any()).

@@ -103,7 +103,6 @@ func pickIndex(min int) int {
 
 // ShouldThrottle return throttle and error. If throttle is true, it means tokens run out.
 // If an error is ErrRateLimitExceeded, DynamoDB API rate limit exceeded.
-// there is a case that error is ErrRateLimitExceeded but throttle is false(non throttle).
 func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, error) {
 	if bucketID == "" {
 		return true, ErrInvalidBucketID
@@ -128,19 +127,28 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 	if throttle && !errors.Is(err, ErrInvalidBucketID) {
 		outputLog(l.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
 	}
+
 	// ignore ConditionalCheckFailed
 	if isErrConditionalCheckFailed(err) {
 		return throttle, nil
 	}
+
 	return throttle, err
 }
 
 // getToken return available tokens. it will tell dynamodb errors to the caller.
-func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64) (int64, error) {
+func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64) (count int64, err error) {
 	item, err := l.getItem(ctx, bucketID, shardID)
 	if err != nil {
 		return 0, err
 	}
+
+	defer func() {
+		if isErrLimitExceeded(err) || errors.Is(err, ErrRateLimitExceeded) {
+			count = 0
+		}
+	}()
+
 	now := timeNow().UnixMilli()
 	token := item.TokenCount
 	refillTokenCount := l.calculateRefillToken(item, now)

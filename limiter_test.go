@@ -163,9 +163,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
-					TokenCount:         0,
+					TokenCount:         1,
 					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+					LastUpdated:        timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).

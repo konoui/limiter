@@ -27,10 +27,10 @@ func FromContext(ctx context.Context) (*Context, bool) {
 	return v, ok
 }
 
-// NewLimitHandler will handle request rate limit.
-// It provide *Context that includes throttle or not, http status and an error.
+// NewLimitHandler will check whether rate limit exceeded or not.
+// It provide *Context that includes throttle or not, http status and an an error.
 // There is a case that status is ok but context has an error.
-// An error is used as logging.
+// We should use throttle to allow/deny requests since. Assuming an error is used as logging.
 func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get(headerKey)
