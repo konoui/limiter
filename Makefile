@@ -19,5 +19,5 @@ build:
 	CGO_ENABLED=0 GOARCH=arm64 go build -ldflags "$(LDFLAGS) -s -w" -o ./bin/main ./cmd
 
 cover:
-	go test -coverprofile=cover.out ./...
+	go test -coverpkg=./... -coverprofile=cover.out ./...
 	go tool cover -html=cover.out -o cover.html

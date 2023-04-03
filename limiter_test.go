@@ -118,7 +118,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			metricFile: "token-run-out.json",
 		},
 		{
-			name: "invalid bucket id",
+			name: "throttle when bucket id is invalid",
 			mocker: func(client *mock.MockDDBClient) {
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -130,7 +130,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:        ErrInvalidBucketID,
 		},
 		{
-			name: "not throttle when time is passed",
+			name: "not throttle when token is refilled due to passed time",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
 					TokenCount:         0,
@@ -147,7 +147,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			throttle: false,
 		},
 		{
-			name: "getItem return rate limit exceeded",
+			name: "throttle when getItem returns API rate limit exceeded",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				client.EXPECT().
@@ -159,7 +159,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			metricFile: "get-item-rate-limit-exceeded.json",
 		},
 		{
-			name: "if updateItem return rate limit exceeded then return current token",
+			name: "throttle when updateItem of refillToken returns DDB API rate limit exceeded",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -179,7 +179,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			metricFile: "update-item-rate-limit-exceeded.json",
 		},
 		{
-			name: "1. updateItem of refillToken return ConditionalCheckFailed then fallback to updateItem of subtractToken and return 1",
+			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken succeeded then one token is available at least",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -201,7 +201,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:      nil,
 		},
 		{
-			name: "2. updateItem of refillToken return ConditionalCheckFailed then fallback to updateItem of subtractToken and return current token",
+			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns current token",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -223,7 +223,30 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:      errUnexpected,
 		},
 		{
-			name: "2. updateItem of subtractToken return ConditionalCheckFailed then token run out",
+			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken returns CCF then toke run out",
+			mocker: func(client *mock.MockDDBClient) {
+				msg := "CCF"
+				item := &ddbItem{
+					TokenCount:         1,
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+				}
+				client.EXPECT().
+					GetItem(gomock.Any(), gomock.Any()).
+					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+			},
+			throttle:   true,
+			metricFile: "refill-token-fallback-to-subtract-token-return-unexpected-error.json",
+			err:        nil,
+		},
+		{
+			name: "throttle if updateItem of subtractToken returns CCF then token run out",
 			mocker: func(client *mock.MockDDBClient) {
 				msg := "my error"
 				item := &ddbItem{
@@ -441,6 +464,7 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 }
 
 func readTestFile(t *testing.T, filename string) string {
+	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", filename))
 	if err != nil {
 		t.Fatal(err)
@@ -449,6 +473,7 @@ func readTestFile(t *testing.T, filename string) string {
 }
 
 func writeTestFile(t *testing.T, data, filename string) {
+	t.Helper()
 	err := os.WriteFile(filepath.Join("testdata", filename), []byte(data), 0600)
 	if err != nil {
 		t.Fatal(err)
