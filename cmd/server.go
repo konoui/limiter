@@ -30,11 +30,11 @@ func start(addr string, rl *limiter.RateLimit, headerKey string) error {
 				return
 			}
 
-			if c.Err != nil {
-				log.Println(c.Err.Error())
-				w.WriteHeader(c.Status)
-				return
-			}
+			defer func() {
+				if c.Err != nil {
+					log.Println("Error", c.Err)
+				}
+			}()
 
 			if c.Throttle {
 				fmt.Fprintf(w, "throttle")
@@ -56,5 +56,4 @@ func start(addr string, rl *limiter.RateLimit, headerKey string) error {
 
 	lambda.Start(httpadapter.NewV2(mux).ProxyWithContext)
 	return nil
-
 }
