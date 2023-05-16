@@ -93,14 +93,15 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		Interval:         3 * time.Second,
 		TableName:        "dummy_table",
 	}
-	errUnexpected := errors.New("unexpected error")
-
+	errDDBInternalServer := &types.InternalServerError{Message: aws.String("my internal server error")}
 	tests := []struct {
 		name       string
 		mocker     func(client *mock.MockDDBClient)
 		throttle   bool
 		err        error
 		metricFile string
+		opt        Opt
+		update     bool
 	}{
 		{
 			name: "throttle when time is not passed and existing token is zero",
@@ -149,10 +150,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		{
 			name: "throttle when getItem returns API rate limit exceeded",
 			mocker: func(client *mock.MockDDBClient) {
-				msg := "my error"
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.LimitExceededException{Message: &msg})
+					Return(nil, &types.LimitExceededException{Message: aws.String("my limit exceeded error")})
 			},
 			throttle:   true,
 			err:        ErrRateLimitExceeded,
@@ -161,7 +161,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		{
 			name: "throttle when updateItem of refillToken returns DDB API rate limit exceeded",
 			mocker: func(client *mock.MockDDBClient) {
-				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         1,
 					BucketSizePerShard: cfg.BucketSize,
@@ -172,7 +171,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.LimitExceededException{Message: &msg})
+					Return(nil, &types.LimitExceededException{Message: aws.String("CCF error")})
 			},
 			throttle:   true,
 			err:        ErrRateLimitExceeded,
@@ -181,7 +180,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		{
 			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken succeeded then one token is available at least",
 			mocker: func(client *mock.MockDDBClient) {
-				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         0,
 					BucketSizePerShard: cfg.BucketSize,
@@ -192,7 +190,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
 					Return(nil, nil)
@@ -203,7 +201,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		{
 			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns current token",
 			mocker: func(client *mock.MockDDBClient) {
-				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         1,
 					BucketSizePerShard: cfg.BucketSize,
@@ -214,18 +211,18 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, errUnexpected)
+					Return(nil, errDDBInternalServer)
 			},
 			throttle: false,
-			err:      errUnexpected,
+			err:      errDDBInternalServer,
 		},
 		{
 			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken returns CCF then toke run out",
 			mocker: func(client *mock.MockDDBClient) {
-				msg := "CCF"
+				msg := aws.String("CCF")
 				item := &ddbItem{
 					TokenCount:         1,
 					BucketSizePerShard: cfg.BucketSize,
@@ -236,10 +233,10 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+					Return(nil, &types.ConditionalCheckFailedException{Message: msg})
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+					Return(nil, &types.ConditionalCheckFailedException{Message: msg})
 			},
 			throttle:   true,
 			metricFile: "refill-token-fallback-to-subtract-token-return-unexpected-error.json",
@@ -248,7 +245,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		{
 			name: "throttle if updateItem of subtractToken returns CCF then token run out",
 			mocker: func(client *mock.MockDDBClient) {
-				msg := "my error"
 				item := &ddbItem{
 					TokenCount:         1,
 					BucketSizePerShard: cfg.BucketSize,
@@ -259,11 +255,32 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: &msg})
+					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
 			},
 			throttle:   true,
 			metricFile: "subtract-token-conditional-check-failed.json",
 			err:        nil,
+		},
+
+		{
+			name: "throttle if updateItem of refillToken returns an internal error with a throttle opt",
+			mocker: func(client *mock.MockDDBClient) {
+				item := &ddbItem{
+					TokenCount:         2,
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+				}
+				client.EXPECT().
+					GetItem(gomock.Any(), gomock.Any()).
+					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, errDDBInternalServer)
+			},
+			throttle:   true,
+			metricFile: "refill-token-with-fail-opt-internal-server-error.json",
+			err:        errDDBInternalServer,
+			opt:        WithThrottleIfFail(),
 		},
 	}
 	for _, tt := range tests {
@@ -279,7 +296,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			tt.mocker(client)
 
 			out := &bytes.Buffer{}
-			rl, err := New(&cfg, client, WithEMFMetrics(out))
+			rl, err := New(&cfg, client, WithEMFMetrics(out), tt.opt)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -294,7 +311,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			// golden test
 			if tt.throttle || errors.Is(err, ErrRateLimitExceeded) {
 				gotJSON := out.String()
-				if false {
+				if tt.update {
 					writeTestFile(t, gotJSON, tt.metricFile)
 				}
 				wantJSON := readTestFile(t, tt.metricFile)

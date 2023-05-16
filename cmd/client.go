@@ -22,7 +22,7 @@ func newDDBClient(ctx context.Context) (*dynamodb.Client, error) {
 	if ddbClient != nil {
 		return ddbClient, nil
 	}
-	cfg, err := config.LoadDefaultConfig(context.Background())
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -31,7 +31,7 @@ func newDDBClient(ctx context.Context) (*dynamodb.Client, error) {
 }
 
 func newCWLClient(ctx context.Context) (*cloudwatchlogs.Client, error) {
-	cfg, err := config.LoadDefaultConfig(context.Background())
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
