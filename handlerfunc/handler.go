@@ -1,15 +1,21 @@
-package limiter
+package handlerfunc
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/konoui/limiter"
 )
 
 type key struct{}
 
-var contextKey = &key{}
+var (
+	contextKey    = &key{}
+	uuidNewRandom = uuid.NewRandom
+)
 
 type Context struct {
 	Err      error
@@ -30,15 +36,15 @@ func FromContext(ctx context.Context) (*Context, bool) {
 // NewLimitHandler will check whether rate limit exceeded or not.
 // It provide *Context that includes throttle or not, http status and an an error.
 // There is a case that status is ok but context has an error.
-// We should use `Throttle“ to allow/deny requests. Assuming an `Err“ is used as logging.
-func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
+// We should use `Throttle“ to allow/deny requests. Assuming an `Err` is used as logging.
+func NewLimitHandler(rl limiter.Limiter, headerKey string) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get(headerKey)
 		if token == "" {
 			lc := &Context{
 				Token:    token,
 				Status:   http.StatusBadRequest,
-				Err:      fmt.Errorf("%s header is empty", headerKey),
+				Err:      fmt.Errorf("%s header has no value", headerKey),
 				Throttle: true,
 			}
 
@@ -54,9 +60,9 @@ func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
 				Err:      err,
 				Throttle: throttle,
 			}
-			if errors.Is(err, ErrInvalidBucketID) {
+			if errors.Is(err, limiter.ErrInvalidBucketID) {
 				lc.Status = http.StatusBadRequest
-			} else if errors.Is(err, ErrRateLimitExceeded) {
+			} else if errors.Is(err, limiter.ErrRateLimitExceeded) {
 				status := http.StatusTooManyRequests
 				if !throttle {
 					status = http.StatusOK
@@ -88,7 +94,7 @@ func NewLimitHandler(rl Limiter, headerKey string) http.HandlerFunc {
 	})
 }
 
-func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
+func NewPrepareTokenHandler(rl limiter.Preparer) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			lc := &Context{
@@ -111,7 +117,7 @@ func NewPrepareTokenHandler(rl Preparer) http.HandlerFunc {
 
 		key := uid.String()
 		if err := rl.PrepareTokens(r.Context(), key); err != nil {
-			if errors.Is(err, ErrRateLimitExceeded) {
+			if errors.Is(err, limiter.ErrRateLimitExceeded) {
 				lc := &Context{
 					Err:    err,
 					Status: http.StatusTooManyRequests,

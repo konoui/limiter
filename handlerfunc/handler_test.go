@@ -1,4 +1,4 @@
-package limiter_test
+package handlerfunc_test
 
 import (
 	"errors"
@@ -9,12 +9,13 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/konoui/limiter"
+	"github.com/konoui/limiter/handlerfunc"
 	mock "github.com/konoui/limiter/mock_limiter"
 )
 
 func MiddlewareLimiter(rl limiter.LimitPreparer, headerKey string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := limiter.NewLimitHandler(rl, headerKey)
+		h := handlerfunc.NewLimitHandler(rl, headerKey)
 		h.ServeHTTP(w, r)
 		next.ServeHTTP(w, r)
 	})
@@ -22,7 +23,7 @@ func MiddlewareLimiter(rl limiter.LimitPreparer, headerKey string, next http.Han
 
 func MiddlewarePrepare(rl limiter.LimitPreparer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := limiter.NewPrepareTokenHandler(rl)
+		h := handlerfunc.NewPrepareTokenHandler(rl)
 		h.ServeHTTP(w, r)
 		next.ServeHTTP(w, r)
 	})
@@ -61,7 +62,7 @@ func Test_Handler(t *testing.T) {
 				return req
 			},
 			status: http.StatusBadRequest,
-			msg:    fmt.Sprintf("%s header is empty", headerKey),
+			msg:    fmt.Sprintf("%s header has no value", headerKey),
 		},
 		{
 			name: "429 and throttle msg",
@@ -172,7 +173,7 @@ func Test_Handler(t *testing.T) {
 			mux := http.NewServeMux()
 			mux.Handle("/", MiddlewareLimiter(rl, headerKey, http.HandlerFunc(
 				func(w http.ResponseWriter, r *http.Request) {
-					c, ok := limiter.FromContext(r.Context())
+					c, ok := handlerfunc.FromContext(r.Context())
 					if !ok {
 						w.WriteHeader(http.StatusBadRequest)
 						fmt.Fprintf(w, "internal server error")
@@ -198,7 +199,7 @@ func Test_Handler(t *testing.T) {
 
 			mux.Handle("/create", MiddlewarePrepare(rl,
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					c, ok := limiter.FromContext(r.Context())
+					c, ok := handlerfunc.FromContext(r.Context())
 					if !ok {
 						w.WriteHeader(http.StatusBadRequest)
 						fmt.Fprintf(w, "internal server error")

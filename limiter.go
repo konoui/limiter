@@ -83,7 +83,7 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 		return nil, err
 	}
 	if cfg.TableName == "" {
-		return nil, errors.New("table_name of config is empty")
+		return nil, errors.New("table_name in config is empty")
 	}
 	l := newLimiter(cfg.TableName, bucket, client, opts...)
 	return l, nil
@@ -131,7 +131,7 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
 	token, err := l.getToken(ctx, bucketID, shardID)
 	throttle := token <= 0
-	// Note ignore an error of invalid bucket id
+	// Note ignore the invalid bucket id error
 	// other throttle will be caught here
 	if throttle && !errors.Is(err, ErrInvalidBucketID) {
 		outputLog(l.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
