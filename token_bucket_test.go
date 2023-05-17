@@ -19,6 +19,12 @@ func Test_NewBucket(t *testing.T) {
 			t.Fatal("non error")
 		}
 	})
+	t.Run("invalid interval", func(t *testing.T) {
+		_, err := newTokenBucket(2, 4, 1*time.Millisecond)
+		if !errors.Is(err, errInvalidInterval) {
+			t.Fatal("non error")
+		}
+	})
 
 	t.Run("distribute", func(t *testing.T) {
 		b, err := newTokenBucket(611, 1300, 1*time.Second)
@@ -27,9 +33,9 @@ func Test_NewBucket(t *testing.T) {
 		}
 		cond1 := b.numOfShards == 3
 		cond2 := len(b.bucketSizePerShard) == 3 && b.bucketSizePerShard[0] == 434 && b.bucketSizePerShard[1] == 433 && b.bucketSizePerShard[2] == 433
-		cond3 := len(b.tokenPerShardPerInterval) == 3 && b.tokenPerShardPerInterval[0] == 204 && b.tokenPerShardPerInterval[1] == 204 && b.tokenPerShardPerInterval[2] == 203
+		cond3 := len(b.tokensPerShardPerInterval) == 3 && b.tokensPerShardPerInterval[0] == 204 && b.tokensPerShardPerInterval[1] == 204 && b.tokensPerShardPerInterval[2] == 203
 		if !(cond1 && cond2 && cond3) {
-			t.Errorf("num: %v, bucketSizePerShard: %v, TokenPerShardPerInterval %v", b.numOfShards, b.bucketSizePerShard, b.tokenPerShardPerInterval)
+			t.Errorf("num: %v, bucketSizePerShard: %v, TokenPerShardPerInterval %v", b.numOfShards, b.bucketSizePerShard, b.tokensPerShardPerInterval)
 		}
 	})
 }

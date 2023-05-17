@@ -9,6 +9,7 @@ import (
 var (
 	errInvalidRateLimitArg        = errors.New("rate_limit must greater than zero")
 	errInvalidRateLimitBucketSize = errors.New("bucket_size must be twice larger than rate_limit at least")
+	errInvalidInterval            = errors.New("interval must be greater than or equal 1 sec")
 	ErrRateLimitExceeded          = errors.New("API rate limit exceeded")
 	ErrInvalidBucketID            = errors.New("invalid bucket id")
 )

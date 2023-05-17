@@ -228,7 +228,7 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 
 func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.interval.Milliseconds()))
-	refill := l.bucket.tokenPerShardPerInterval[item.ShardID] * int64(num)
+	refill := l.bucket.tokensPerShardPerInterval[item.ShardID] * int64(num)
 	burstable := item.BucketSizePerShard - item.TokenCount
 	if refill > burstable {
 		return burstable

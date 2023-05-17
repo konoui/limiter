@@ -7,13 +7,19 @@ import (
 
 var DefaultInterval = 60 * time.Second
 
+const (
+	writeCapacityUnitPerPartition = 1000
+	maxWriteCount                 = 2 // worst case: refillToken and fallback subtractToken
+	maxRatePerSec                 = writeCapacityUnitPerPartition / maxWriteCount
+)
+
 type TokenBucket struct {
 	// numOfShards presents number of shard
 	numOfShards int64
-	// tokenPerInterval presents rateLimit per shard
-	tokenPerShardPerInterval []int64
-	bucketSizePerShard       []int64
-	interval                 time.Duration
+	// tokensPerInterval presents rateLimit per shard
+	tokensPerShardPerInterval []int64
+	bucketSizePerShard        []int64
+	interval                  time.Duration
 }
 
 // NewTokenBucket return a token bucket instance.
@@ -29,15 +35,19 @@ func newTokenBucket(rateLimit, bucketSize int64, interval time.Duration) (*Token
 		return nil, errInvalidRateLimitBucketSize
 	}
 
-	maxRate := 500 * interval.Seconds()
+	if interval < 1*time.Second {
+		return nil, errInvalidInterval
+	}
+
+	maxRate := maxRatePerSec * interval.Seconds()
 	numOfShards := int64(math.Ceil(float64(bucketSize) / maxRate))
 	baseTokens := distribute(rateLimit, numOfShards)
 	bucketSizePerShard := distribute(bucketSize, numOfShards)
 	b := &TokenBucket{
-		numOfShards:              numOfShards,
-		tokenPerShardPerInterval: baseTokens,
-		bucketSizePerShard:       bucketSizePerShard,
-		interval:                 interval,
+		numOfShards:               numOfShards,
+		tokensPerShardPerInterval: baseTokens,
+		bucketSizePerShard:        bucketSizePerShard,
+		interval:                  interval,
 	}
 	return b, nil
 }

@@ -15,11 +15,7 @@ type Config struct {
 }
 
 func NewConfig(r io.Reader) (*Config, error) {
-	c, err := newConfig(r)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
+	return newConfig(r)
 }
 
 func newConfig(ro io.Reader) (*Config, error) {
