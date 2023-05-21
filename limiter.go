@@ -70,6 +70,8 @@ func WithEMFMetrics(w io.Writer) Opt {
 	}
 }
 
+// WithAnonymous allows bucket id not registered to check throttled or not.
+// This is used for such as an IP address basis throttling.
 func WithAnonymous() Opt {
 	return func(rl *RateLimit) {
 		rl.anonymous = true
@@ -232,15 +234,17 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 		if l.anonymous {
 			// return temporary token as create operation is executed by refillToken().
 			// avoid to call prepareTokens() API.
-			return &ddbItem{
+			i := &ddbItem{
 				BucketIDShardID: makePartitionKey(bucketID, shardID),
-				bucketID:        bucketID,
-				shardID:         shardID,
 				TokenCount:      0,
 				LastUpdated: timeNow().
-					Add(-l.bucket.interval * time.Duration(l.bucket.tokensPerShardPerInterval[shardID])).
+					Add(-l.bucket.interval * time.Duration(l.bucket.bucketSizePerShard[shardID])).
 					UnixMilli(),
-			}, nil
+				BucketSizePerShard: l.bucket.bucketSizePerShard[shardID],
+				bucketID:           bucketID,
+				shardID:            shardID,
+			}
+			return i, nil
 		}
 		return nil, fmt.Errorf("bucket ID: %s: %w", bucketID, ErrInvalidBucketID)
 	}
@@ -257,6 +261,9 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 
 func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.interval.Milliseconds()))
+	if num < 0 {
+		return 0
+	}
 	refill := l.bucket.tokensPerShardPerInterval[item.shardID] * int64(num)
 	burstable := item.BucketSizePerShard - item.TokenCount
 	if refill > burstable {

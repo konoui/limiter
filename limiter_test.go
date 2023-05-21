@@ -45,13 +45,14 @@ func testClient(t *testing.T) *dynamodb.Client {
 	return client
 }
 
-func testRateLimit(t *testing.T, cfg *Config) *RateLimit {
+func testRateLimit(t *testing.T, cfg *Config, opts ...Opt) *RateLimit {
 	t.Helper()
 	client := testClient(t)
 	cfg.TableName = "test_buckets_table"
 	l, err := New(
 		cfg,
 		client,
+		opts...,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -324,6 +325,29 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 }
 
 func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
+	t.Run("anonymous", func(t *testing.T) {
+		ctx := context.Background()
+		cfg := &Config{
+			TokenPerInterval: 2,
+			BucketSize:       2 * 2,
+			Interval:         3 * time.Second,
+		}
+
+		l := testRateLimit(t, cfg, WithAnonymous())
+		id := int64String(int64(pickIndex(100000)))
+
+		t.Logf("bucket-id %s\n", id)
+		throttle, err := l.ShouldThrottle(ctx, id)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+			return
+		}
+
+		if throttle {
+			t.Errorf("unexpected throttle: %v", throttle)
+			return
+		}
+	})
 	t.Run("throttle", func(t *testing.T) {
 		t.Cleanup(func() { timeNow = time.Now })
 
