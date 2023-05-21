@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -23,6 +24,7 @@ var (
 	uuidNewRandom                     = uuid.NewRandom
 	_                   LimitPreparer = &RateLimit{}
 	attrBucketIDShardID               = "bucket_id_shard_id"
+	attrTTL                           = "ttl"
 )
 
 const (
@@ -50,6 +52,7 @@ type RateLimit struct {
 	metricOut      io.Writer
 	throttleIfFail bool
 	anonymous      bool
+	ttl            time.Duration
 }
 
 type ddbItem struct {
@@ -58,6 +61,7 @@ type ddbItem struct {
 	// milliseconds unix timestamp
 	LastUpdated        int64 `dynamodbav:"last_updated" json:"last_updated"`
 	BucketSizePerShard int64 `dynamodbav:"bucket_size_per_shard" json:"bucket_size_per_shard"`
+	TTL                int64 `dynamodbav:"ttl" json:"ttl"`
 	shardID            int64
 	bucketID           string
 }
@@ -72,9 +76,10 @@ func WithEMFMetrics(w io.Writer) Opt {
 
 // WithAnonymous allows bucket id not registered to check throttled or not.
 // This is used for such as an IP address basis throttling.
-func WithAnonymous() Opt {
+func WithAnonymous(ttl time.Duration) Opt {
 	return func(rl *RateLimit) {
 		rl.anonymous = true
+		rl.ttl = ttl
 	}
 }
 
@@ -294,6 +299,8 @@ func (l *RateLimit) refillToken(ctx context.Context,
 		Add(
 			expression.Name("token_count"), expression.Value(refillTokenCount),
 		)
+	updateExpr = l.updateTTLExpr(updateExpr, now)
+
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
 		return fmt.Errorf("refill build: %w", err)
@@ -329,6 +336,8 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 			expression.Name("token_count"),
 			expression.Value(-1),
 		)
+	updateExpr = l.updateTTLExpr(updateExpr, now)
+
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
 		return fmt.Errorf("subtract build: %w", err)
@@ -348,6 +357,17 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		return fmt.Errorf("subtract-item: %w", err)
 	}
 	return nil
+}
+
+func (l *RateLimit) updateTTLExpr(expr expression.UpdateBuilder, now int64) expression.UpdateBuilder {
+	if l.ttl > 0 {
+		expr.Set(
+			expression.Name(attrTTL),
+			// second unix timestamp
+			expression.Value(time.UnixMilli(now).Unix()+int64(l.ttl.Seconds())),
+		)
+	}
+	return expr
 }
 
 func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err error) {
@@ -431,11 +451,28 @@ func CreateTable(ctx context.Context, tableName string, client *dynamodb.Client)
 			},
 		},
 	}
+
 	_, err := client.CreateTable(ctx, input)
 	var ae *types.TableAlreadyExistsException
 	var ie *types.ResourceInUseException
 	if errors.As(err, &ae) || errors.As(err, &ie) {
 		return nil
 	}
+
+	waiter := dynamodb.NewTableExistsWaiter(client)
+	err = waiter.Wait(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(tableName)}, 1*time.Minute)
+	if err != nil {
+		return err
+	}
+
+	ttlInput := &dynamodb.UpdateTimeToLiveInput{
+		TableName: &tableName,
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{
+			Enabled:       aws.Bool(true),
+			AttributeName: &attrTTL,
+		},
+	}
+
+	_, err = client.UpdateTimeToLive(ctx, ttlInput)
 	return err
 }

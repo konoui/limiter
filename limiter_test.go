@@ -326,6 +326,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 
 func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 	t.Run("anonymous", func(t *testing.T) {
+		t.Cleanup(func() { timeNow = time.Now })
+
 		ctx := context.Background()
 		cfg := &Config{
 			TokenPerInterval: 2,
@@ -333,7 +335,10 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 			Interval:         3 * time.Second,
 		}
 
-		l := testRateLimit(t, cfg, WithAnonymous())
+		timeNow = myNow(0)
+		ttl := 24 * time.Hour
+		wantTTL := timeNow().Unix() + int64(ttl.Seconds())
+		l := testRateLimit(t, cfg, WithAnonymous(ttl))
 		id := int64String(int64(pickIndex(100000)))
 
 		t.Logf("bucket-id %s\n", id)
@@ -346,6 +351,11 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		if throttle {
 			t.Errorf("unexpected throttle: %v", throttle)
 			return
+		}
+
+		item, _ := l.getItem(ctx, id, 0)
+		if item.TTL != wantTTL {
+			t.Errorf("unexpected ttl: want: %d, got: %d", wantTTL, item.TTL)
 		}
 	})
 	t.Run("throttle", func(t *testing.T) {
