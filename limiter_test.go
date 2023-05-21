@@ -470,7 +470,7 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 				LastUpdated:        now.Add(-tt.wait).UnixMilli(),
 				BucketSizePerShard: tt.base * 2,
 				TokenCount:         tt.cur,
-				ShardID:            0,
+				shardID:            0,
 			}, now.UnixMilli())
 
 			if got != tt.want {

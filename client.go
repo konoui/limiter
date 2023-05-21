@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -92,7 +93,19 @@ func getKeys(attr map[string]types.AttributeValue) (bucketID string, shardID str
 	if err != nil {
 		return "", "", fmt.Errorf("handle input: %w", err)
 	}
-	return item.BucketID, int64String(item.ShardID), nil
+	values := strings.SplitN(item.BucketIDShardID, delimiter, 2)
+	if len(values) != 2 {
+		return "", "", fmt.Errorf("unexpected partition key: %s", item.BucketIDShardID)
+	}
+	return splitPartitionKey(item.BucketIDShardID)
+}
+
+func splitPartitionKey(bucketIDShardID string) (bucketID, shardID string, _ error) {
+	values := strings.SplitN(bucketIDShardID, delimiter, 2)
+	if len(values) != 2 {
+		return "", "", fmt.Errorf("unexpected partition key: %s", bucketIDShardID)
+	}
+	return values[0], values[1], nil
 }
 
 type EMF struct {

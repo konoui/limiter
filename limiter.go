@@ -19,9 +19,14 @@ import (
 
 var (
 	// TimeNow is global variable for mock
-	timeNow                     = time.Now
-	uuidNewRandom               = uuid.NewRandom
-	_             LimitPreparer = &RateLimit{}
+	timeNow                           = time.Now
+	uuidNewRandom                     = uuid.NewRandom
+	_                   LimitPreparer = &RateLimit{}
+	attrBucketIDShardID               = "bucket_id_shard_id"
+)
+
+const (
+	delimiter = "#"
 )
 
 //go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
@@ -44,14 +49,17 @@ type RateLimit struct {
 	tableName      string
 	metricOut      io.Writer
 	throttleIfFail bool
+	anonymous      bool
 }
 
 type ddbItem struct {
-	BucketID           string `dynamodbav:"bucket_id" json:"bucket_id"`
-	ShardID            int64  `dynamodbav:"shard_id" json:"shard_id"`
-	TokenCount         int64  `dynamodbav:"token_count" json:"token_count"`
-	LastUpdated        int64  `dynamodbav:"last_updated" json:"last_updated"`
-	BucketSizePerShard int64  `dynamodbav:"bucket_size_per_shard" json:"bucket_size_per_shard"`
+	BucketIDShardID string `dynamodbav:"bucket_id_shard_id" json:"bucket_id_shard_id"`
+	TokenCount      int64  `dynamodbav:"token_count" json:"token_count"`
+	// milliseconds unix timestamp
+	LastUpdated        int64 `dynamodbav:"last_updated" json:"last_updated"`
+	BucketSizePerShard int64 `dynamodbav:"bucket_size_per_shard" json:"bucket_size_per_shard"`
+	shardID            int64
+	bucketID           string
 }
 
 type Opt func(rl *RateLimit)
@@ -59,6 +67,12 @@ type Opt func(rl *RateLimit)
 func WithEMFMetrics(w io.Writer) Opt {
 	return func(rl *RateLimit) {
 		rl.metricOut = w
+	}
+}
+
+func WithAnonymous() Opt {
+	return func(rl *RateLimit) {
+		rl.anonymous = true
 	}
 }
 
@@ -206,7 +220,7 @@ func (l RateLimit) internalThrottle(cur int64, err error) (int64, error) {
 
 func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64) (*ddbItem, error) {
 	input := &dynamodb.GetItemInput{
-		Key:       buildKey(bucketID, shardID),
+		Key:       buildPartitionKey(bucketID, shardID),
 		TableName: &l.tableName,
 	}
 	resp, err := l.client.GetItem(ctx, input)
@@ -215,6 +229,19 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 	}
 	// check registered token or not
 	if len(resp.Item) == 0 {
+		if l.anonymous {
+			// return temporary token as create operation is executed by refillToken().
+			// avoid to call prepareTokens() API.
+			return &ddbItem{
+				BucketIDShardID: makePartitionKey(bucketID, shardID),
+				bucketID:        bucketID,
+				shardID:         shardID,
+				TokenCount:      0,
+				LastUpdated: timeNow().
+					Add(-l.bucket.interval * time.Duration(l.bucket.tokensPerShardPerInterval[shardID])).
+					UnixMilli(),
+			}, nil
+		}
 		return nil, fmt.Errorf("bucket ID: %s: %w", bucketID, ErrInvalidBucketID)
 	}
 
@@ -223,12 +250,14 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 		return nil, err
 	}
 
+	// add internal value
+	item.bucketID, item.shardID = bucketID, shardID
 	return item, nil
 }
 
 func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.interval.Milliseconds()))
-	refill := l.bucket.tokensPerShardPerInterval[item.ShardID] * int64(num)
+	refill := l.bucket.tokensPerShardPerInterval[item.shardID] * int64(num)
 	burstable := item.BucketSizePerShard - item.TokenCount
 	if refill > burstable {
 		return burstable
@@ -264,7 +293,7 @@ func (l *RateLimit) refillToken(ctx context.Context,
 	}
 	input := &dynamodb.UpdateItemInput{
 		TableName:                 &l.tableName,
-		Key:                       buildKey(bucketID, shardID),
+		Key:                       buildPartitionKey(bucketID, shardID),
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
 		UpdateExpression:          expr.Update(),
@@ -298,7 +327,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, bucketID string, shardID,
 		return fmt.Errorf("subtract build: %w", err)
 	}
 	input := &dynamodb.UpdateItemInput{
-		Key:                       buildKey(bucketID, shardID),
+		Key:                       buildPartitionKey(bucketID, shardID),
 		TableName:                 &l.tableName,
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
@@ -333,8 +362,7 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 	requests := make([]types.WriteRequest, 0, len(shards))
 	for _, shardID := range shards {
 		item := &ddbItem{
-			BucketID:           bucketID,
-			ShardID:            shardID,
+			BucketIDShardID:    makePartitionKey(bucketID, shardID),
 			LastUpdated:        now,
 			TokenCount:         l.bucket.bucketSizePerShard[shardID],
 			BucketSizePerShard: l.bucket.bucketSizePerShard[shardID],
@@ -366,41 +394,33 @@ func int64String(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
 
-func buildKey(bucketID string, shardID int64) map[string]types.AttributeValue {
+func makePartitionKey(bucketID string, shardID int64) string {
+	return fmt.Sprintf("%s%s%d", bucketID, delimiter, shardID)
+}
+
+func buildPartitionKey(bucketID string, shardID int64) map[string]types.AttributeValue {
+	bucketIDShardID := makePartitionKey(bucketID, shardID)
 	return map[string]types.AttributeValue{
-		"bucket_id": &types.AttributeValueMemberS{
-			Value: bucketID,
-		},
-		"shard_id": &types.AttributeValueMemberN{
-			Value: int64String(shardID),
+		attrBucketIDShardID: &types.AttributeValueMemberS{
+			Value: bucketIDShardID,
 		},
 	}
 }
 
 func CreateTable(ctx context.Context, tableName string, client *dynamodb.Client) error {
-	bucketKey := "bucket_id"
-	bucketShardID := "shard_id"
 	input := &dynamodb.CreateTableInput{
 		TableName:   &tableName,
 		BillingMode: types.BillingModePayPerRequest,
 		KeySchema: []types.KeySchemaElement{
 			{
-				AttributeName: &bucketKey,
+				AttributeName: &attrBucketIDShardID,
 				KeyType:       types.KeyTypeHash,
-			},
-			{
-				AttributeName: &bucketShardID,
-				KeyType:       types.KeyTypeRange,
 			},
 		},
 		AttributeDefinitions: []types.AttributeDefinition{
 			{
-				AttributeName: &bucketKey,
+				AttributeName: &attrBucketIDShardID,
 				AttributeType: types.ScalarAttributeTypeS,
-			},
-			{
-				AttributeName: &bucketShardID,
-				AttributeType: types.ScalarAttributeTypeN,
 			},
 		},
 	}
