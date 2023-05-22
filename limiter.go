@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
@@ -52,6 +53,7 @@ type RateLimit struct {
 	metricOut io.Writer
 	anonymous bool
 	ttl       time.Duration
+	ncache    *lru.Cache[string, interface{}]
 }
 
 type ddbItem struct {
@@ -73,12 +75,20 @@ func WithEMFMetrics(w io.Writer) Opt {
 	}
 }
 
-// WithAnonymous allows not registered. bucket id.
+// WithAnonymous allows not registered bucket id.
 // This is used for such as an IP address basis throttling.
 func WithAnonymous(ttl time.Duration) Opt {
 	return func(rl *RateLimit) {
 		rl.anonymous = true
 		rl.ttl = ttl
+	}
+}
+
+// WithNegativeCache configures negative cache entry size for invalid bucket ids.
+// specifying 0 means to disable cache
+func WithNegativeCache(size int) Opt {
+	return func(rl *RateLimit) {
+		rl.ncache.Resize(size)
 	}
 }
 
@@ -106,6 +116,7 @@ func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt
 		bucket:    bucket,
 		tableName: table,
 		metricOut: io.Discard,
+		ncache:    defaultCache,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -141,8 +152,18 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 }
 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
+	if bucketID != "" && l.ncache.Contains(bucketID) {
+		return true, fmt.Errorf("found %s in negative cache: %w", bucketID, ErrInvalidBucketID)
+	}
+
 	token, err := l.getToken(ctx, bucketID, shardID)
 	throttle := token <= 0
+
+	// add negative cache
+	if errors.Is(err, ErrInvalidBucketID) {
+		l.ncache.Add(bucketID, nil)
+	}
+
 	// Note ignore the invalid bucket id error
 	// other throttle will be caught here
 	if throttle && !errors.Is(err, ErrInvalidBucketID) {

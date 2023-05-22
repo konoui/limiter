@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,7 +95,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		Interval:         3 * time.Second,
 		TableName:        "dummy_table",
 	}
-	errDDBInternalServer := &types.InternalServerError{Message: aws.String("my internal server error")}
 	tests := []struct {
 		name       string
 		mocker     func(client *mock.MockDDBClient)
@@ -214,11 +214,30 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
 				client.EXPECT().
 					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, errDDBInternalServer)
+					Return(nil, &types.InternalServerError{Message: aws.String("my internal server error")})
 			},
 			metricFile: "fallback-subtract-token-failed-due-to-internal-error.json",
 			throttle:   true,
-			err:        errDDBInternalServer,
+			err:        ErrInternal,
+		},
+		{
+			name: "throttle if updateItem of refillToken returns an internal error",
+			mocker: func(client *mock.MockDDBClient) {
+				item := &ddbItem{
+					TokenCount:         2,
+					BucketSizePerShard: cfg.BucketSize,
+					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+				}
+				client.EXPECT().
+					GetItem(gomock.Any(), gomock.Any()).
+					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
+				client.EXPECT().
+					UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.InternalServerError{Message: aws.String("my internal server error")})
+			},
+			throttle:   true,
+			metricFile: "refill-token-with-fail-opt-internal-server-error.json",
+			err:        ErrInternal,
 		},
 		{
 			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken returns CCF then toke run out",
@@ -262,26 +281,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			metricFile: "subtract-token-conditional-check-failed.json",
 			err:        nil,
 		},
-
-		{
-			name: "throttle if updateItem of refillToken returns an internal error with a throttle opt",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:         2,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, errDDBInternalServer)
-			},
-			throttle:   true,
-			metricFile: "refill-token-with-fail-opt-internal-server-error.json",
-			err:        errDDBInternalServer,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -296,7 +295,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			tt.mocker(client)
 
 			out := &bytes.Buffer{}
-			rl, err := New(&cfg, client, WithEMFMetrics(out))
+			rl, err := New(&cfg, client, WithEMFMetrics(out), WithNegativeCache(0))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -320,6 +319,40 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRateLimit_ShouldThrottleWithNegativeCache(t *testing.T) {
+	cfg := Config{
+		TokenPerInterval: 2,
+		BucketSize:       2 * 2,
+		Interval:         3 * time.Second,
+		TableName:        "dummy_table",
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	client := mock.NewMockDDBClient(ctrl)
+	client.EXPECT().
+		GetItem(gomock.Any(), gomock.Any()).
+		Return(&dynamodb.GetItemOutput{}, nil)
+
+	l, err := New(&cfg, client, WithNegativeCache(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	throttle, err := l.ShouldThrottle(context.Background(), "invalid-bucket-id")
+	if !errors.Is(err, ErrInvalidBucketID) {
+		t.Errorf("want: %v, got: %v", ErrInvalidBucketID, err)
+	}
+	if !throttle {
+		t.Errorf("should throttle")
+	}
+
+	throttle, err = l.ShouldThrottle(context.Background(), "invalid-bucket-id")
+	if !(errors.Is(err, ErrInvalidBucketID) && strings.Contains(err.Error(), "negative cache") && throttle) {
+		t.Errorf("want: %v, got: %v throttle result: %v", ErrInvalidBucketID, err, throttle)
 	}
 }
 

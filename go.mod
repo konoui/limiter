@@ -15,6 +15,7 @@ require (
 	github.com/goccy/go-yaml v1.11.0
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.3.0
+	github.com/hashicorp/golang-lru/v2 v2.0.2
 	github.com/spf13/cobra v1.7.0
 )
 
