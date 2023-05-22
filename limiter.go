@@ -46,13 +46,12 @@ type Preparer interface {
 }
 
 type RateLimit struct {
-	client         DDBClient
-	bucket         *TokenBucket
-	tableName      string
-	metricOut      io.Writer
-	throttleIfFail bool
-	anonymous      bool
-	ttl            time.Duration
+	client    DDBClient
+	bucket    *TokenBucket
+	tableName string
+	metricOut io.Writer
+	anonymous bool
+	ttl       time.Duration
 }
 
 type ddbItem struct {
@@ -74,20 +73,12 @@ func WithEMFMetrics(w io.Writer) Opt {
 	}
 }
 
-// WithAnonymous allows bucket id not registered to check throttled or not.
+// WithAnonymous allows not registered. bucket id.
 // This is used for such as an IP address basis throttling.
 func WithAnonymous(ttl time.Duration) Opt {
 	return func(rl *RateLimit) {
 		rl.anonymous = true
 		rl.ttl = ttl
-	}
-}
-
-// WithThrottleIfFail decides throttled or not when DDB API return an unexpected error.
-// If specified, DDB API receives an internal error, ShouldThrottle() return true.
-func WithThrottleIfFail() Opt {
-	return func(rl *RateLimit) {
-		rl.throttleIfFail = true
 	}
 }
 
@@ -195,34 +186,30 @@ func (l *RateLimit) getToken(ctx context.Context, bucketID string, shardID int64
 						return 0, err
 					}
 					// an internal error at subtractToken
-					return l.internalThrottle(token, err)
+					return 0, errors.Join(err, ErrInternal)
 				}
 				// subtractToken successfully
 				return 1, err
 			}
 			// an internal error at refillToken
-			return l.internalThrottle(token, err)
+			return 0, errors.Join(err, ErrInternal)
 		}
 		// available token are current token count + refill token count
 		return token + refillTokenCount, nil
 	case token > 0:
 		err := l.subtractToken(ctx, bucketID, shardID, now)
-		if isErrConditionalCheckFailed(err) {
-			// if ConditionalCheckFailedException, it means tokens run out by other request.
-			return 0, err
+		if err != nil {
+			if isErrConditionalCheckFailed(err) {
+				// if ConditionalCheckFailedException, it means tokens run out by other request.
+				return 0, err
+			}
+			// an internal error at subtractToken
+			return 0, errors.Join(err, ErrInternal)
 		}
-		// an internal error at subtractToken
-		return l.internalThrottle(token, err)
+		return token, nil
 	default:
 		return 0, nil
 	}
-}
-
-func (l RateLimit) internalThrottle(cur int64, err error) (int64, error) {
-	if l.throttleIfFail {
-		return 0, err
-	}
-	return cur, err
 }
 
 func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64) (*ddbItem, error) {

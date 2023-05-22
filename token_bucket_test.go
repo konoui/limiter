@@ -26,6 +26,16 @@ func Test_NewBucket(t *testing.T) {
 		}
 	})
 
+	t.Run("num of shards", func(t *testing.T) {
+		b, err := newTokenBucket(2, 600, 60*time.Minute)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if b.numOfShards != 2 {
+			t.Errorf("want: 2, got: %d", b.numOfShards)
+		}
+	})
+
 	t.Run("distribute", func(t *testing.T) {
 		b, err := newTokenBucket(611, 1300, 1*time.Second)
 		if err != nil {

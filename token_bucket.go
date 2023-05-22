@@ -39,8 +39,7 @@ func newTokenBucket(rateLimit, bucketSize int64, interval time.Duration) (*Token
 		return nil, errInvalidInterval
 	}
 
-	maxRate := maxRatePerSec * interval.Seconds()
-	numOfShards := int64(math.Ceil(float64(bucketSize) / maxRate))
+	numOfShards := int64(math.Ceil(float64(bucketSize) / maxRatePerSec))
 	baseTokens := distribute(rateLimit, numOfShards)
 	bucketSizePerShard := distribute(bucketSize, numOfShards)
 	b := &TokenBucket{

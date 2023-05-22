@@ -101,7 +101,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		throttle   bool
 		err        error
 		metricFile string
-		opt        Opt
 		update     bool
 	}{
 		{
@@ -200,7 +199,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:      nil,
 		},
 		{
-			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns current token",
+			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns zero token",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
 					TokenCount:         1,
@@ -217,8 +216,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 					UpdateItem(gomock.Any(), gomock.Any()).
 					Return(nil, errDDBInternalServer)
 			},
-			throttle: false,
-			err:      errDDBInternalServer,
+			metricFile: "fallback-subtract-token-failed-due-to-internal-error.json",
+			throttle:   true,
+			err:        errDDBInternalServer,
 		},
 		{
 			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken returns CCF then toke run out",
@@ -281,7 +281,6 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			throttle:   true,
 			metricFile: "refill-token-with-fail-opt-internal-server-error.json",
 			err:        errDDBInternalServer,
-			opt:        WithThrottleIfFail(),
 		},
 	}
 	for _, tt := range tests {
@@ -297,7 +296,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			tt.mocker(client)
 
 			out := &bytes.Buffer{}
-			rl, err := New(&cfg, client, WithEMFMetrics(out), tt.opt)
+			rl, err := New(&cfg, client, WithEMFMetrics(out))
 			if err != nil {
 				t.Fatal(err)
 			}

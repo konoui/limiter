@@ -93,10 +93,6 @@ func getKeys(attr map[string]types.AttributeValue) (bucketID string, shardID str
 	if err != nil {
 		return "", "", fmt.Errorf("handle input: %w", err)
 	}
-	values := strings.SplitN(item.BucketIDShardID, delimiter, 2)
-	if len(values) != 2 {
-		return "", "", fmt.Errorf("unexpected partition key: %s", item.BucketIDShardID)
-	}
 	return splitPartitionKey(item.BucketIDShardID)
 }
 
