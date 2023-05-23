@@ -54,6 +54,7 @@ type RateLimit struct {
 	anonymous bool
 	ttl       time.Duration
 	ncache    *lru.Cache[string, interface{}]
+	maxLength int
 }
 
 type ddbItem struct {
@@ -117,6 +118,7 @@ func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt
 		tableName: table,
 		metricOut: io.Discard,
 		ncache:    defaultCache,
+		maxLength: 512, // WCU is 1kib basis
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -152,21 +154,28 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 }
 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
+	// first, validate bucket id
+	if l.maxLength < len(bucketID) {
+		return true, fmt.Errorf("exceeded maximum bucket id lengt %d: %w", l.maxLength, ErrInvalidBucketID)
+	}
+
+	// second search from negative cache
 	if bucketID != "" && l.ncache.Contains(bucketID) {
 		return true, fmt.Errorf("found %s in negative cache: %w", bucketID, ErrInvalidBucketID)
 	}
 
 	token, err := l.getToken(ctx, bucketID, shardID)
 	throttle := token <= 0
+	isInvalidBucketID := errors.Is(err, ErrInvalidBucketID)
 
 	// add negative cache
-	if errors.Is(err, ErrInvalidBucketID) {
+	if isInvalidBucketID {
 		l.ncache.Add(bucketID, nil)
 	}
 
 	// Note ignore the invalid bucket id error
 	// other throttle will be caught here
-	if throttle && !errors.Is(err, ErrInvalidBucketID) {
+	if throttle && !isInvalidBucketID {
 		outputLog(l.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
 	}
 
@@ -259,7 +268,7 @@ func (l *RateLimit) getItem(ctx context.Context, bucketID string, shardID int64)
 			}
 			return i, nil
 		}
-		return nil, fmt.Errorf("bucket ID: %s: %w", bucketID, ErrInvalidBucketID)
+		return nil, fmt.Errorf("bucket id: %s: %w", bucketID, ErrInvalidBucketID)
 	}
 
 	item := new(ddbItem)
