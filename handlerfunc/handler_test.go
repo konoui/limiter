@@ -15,7 +15,14 @@ import (
 
 func MiddlewareLimiter(rl limiter.LimitPreparer, headerKey string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := handlerfunc.NewLimitHandler(rl, headerKey)
+		getKey := func(r *http.Request) (string, error) {
+			v := r.Header.Get(headerKey)
+			if v == "" {
+				return "", fmt.Errorf("%s header has no value", headerKey)
+			}
+			return v, nil
+		}
+		h := handlerfunc.NewHandler(rl, getKey)
 		h.ServeHTTP(w, r)
 		next.ServeHTTP(w, r)
 	})

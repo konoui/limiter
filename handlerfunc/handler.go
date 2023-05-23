@@ -11,6 +11,7 @@ import (
 )
 
 type key struct{}
+type GetKey = func(*http.Request) (string, error)
 
 var (
 	contextKey    = &key{}
@@ -22,6 +23,29 @@ type Context struct {
 	Throttle bool
 	Status   int
 	Token    string
+}
+
+// ResultToStatus is an utility.
+// convert values returned by limiter.ShouldThrottle() to a http status code
+func ResultToStatus(throttle bool, err error) int {
+	switch {
+	case err == nil:
+		if throttle {
+			return http.StatusTooManyRequests
+		}
+		return http.StatusOK
+	case errors.Is(err, limiter.ErrInvalidBucketID):
+		return http.StatusBadRequest
+	case errors.Is(err, limiter.ErrRateLimitExceeded):
+		if throttle {
+			return http.StatusTooManyRequests
+		}
+		return http.StatusOK
+	case errors.Is(err, limiter.ErrInternal):
+		return http.StatusInternalServerError
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func NewContext(ctx context.Context, lc *Context) context.Context {
@@ -37,58 +61,28 @@ func FromContext(ctx context.Context) (*Context, bool) {
 // It provide *Context that includes throttle or not, http status and an an error.
 // There is a case that status is ok but context has an error.
 // We should use `Throttle“ to allow/deny requests. Assuming an `Err` is used as logging.
-func NewLimitHandler(rl limiter.Limiter, headerKey string) http.HandlerFunc {
+func NewHandler(rl limiter.Limiter, getKey GetKey) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get(headerKey)
-		if token == "" {
-			lc := &Context{
-				Token:    token,
-				Status:   http.StatusBadRequest,
-				Err:      fmt.Errorf("%s header has no value", headerKey),
-				Throttle: true,
-			}
-
-			*r = *r.WithContext(NewContext(r.Context(), lc))
-			return
-		}
-
-		throttle, err := rl.ShouldThrottle(r.Context(), token)
+		key, err := getKey(r)
 		if err != nil {
 			lc := &Context{
-				Token:    token,
-				Status:   http.StatusInternalServerError,
+				Token:    key,
+				Status:   http.StatusBadRequest,
 				Err:      err,
-				Throttle: throttle,
-			}
-			if errors.Is(err, limiter.ErrInvalidBucketID) {
-				lc.Status = http.StatusBadRequest
-			} else if errors.Is(err, limiter.ErrRateLimitExceeded) {
-				status := http.StatusTooManyRequests
-				if !throttle {
-					status = http.StatusOK
-				}
-				lc.Status = status
-			}
-			*r = *r.WithContext(NewContext(r.Context(), lc))
-			return
-		}
-
-		if throttle {
-			lc := &Context{
-				Token:    token,
-				Status:   http.StatusTooManyRequests,
-				Err:      nil,
 				Throttle: true,
 			}
+
 			*r = *r.WithContext(NewContext(r.Context(), lc))
 			return
 		}
 
+		throttle, err := rl.ShouldThrottle(r.Context(), key)
+		status := ResultToStatus(throttle, err)
 		lc := &Context{
-			Token:    token,
-			Status:   http.StatusOK,
-			Err:      nil,
-			Throttle: false,
+			Token:    key,
+			Status:   status,
+			Err:      err,
+			Throttle: throttle,
 		}
 		*r = *r.WithContext(NewContext(r.Context(), lc))
 	})
