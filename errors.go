@@ -3,6 +3,8 @@ package limiter
 import (
 	"errors"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
@@ -22,7 +24,15 @@ func isErrConditionalCheckFailed(err error) bool {
 
 // see https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/transaction-apis.html#transaction-conflict-handling
 func isErrLimitExceeded(err error) bool {
+	// https://github.com/aws/aws-sdk-go-v2/blob/v1.18.0/aws/retry/throttle_error.go#L47
+	// https://github.com/aws/aws-sdk-go-v2/blob/v1.18.0/aws/retry/standard.go#L60
+	codes := retry.ThrottleErrorCode{Codes: retry.DefaultThrottleErrorCodes}
+	if codes.IsErrorThrottle(err) == aws.TrueTernary {
+		return true
+	}
+
 	var le *types.LimitExceededException
 	var re *types.RequestLimitExceeded
-	return errors.As(err, &le) || errors.As(err, &re)
+	var pte *types.ProvisionedThroughputExceededException
+	return errors.As(err, &le) || errors.As(err, &re) || errors.As(err, &pte)
 }
