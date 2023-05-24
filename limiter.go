@@ -76,18 +76,14 @@ func WithEMFMetrics(w io.Writer) Opt {
 	}
 }
 
-// WithAnonymous allows not registered bucket id.
-// This is used for such as an IP address basis throttling.
-func WithAnonymous(ttl time.Duration) Opt {
+func withAnonymous(ttl time.Duration) Opt {
 	return func(rl *RateLimit) {
 		rl.anonymous = true
 		rl.ttl = ttl
 	}
 }
 
-// WithNegativeCache configures negative cache entry size for invalid bucket ids.
-// specifying 0 means to disable cache
-func WithNegativeCache(size int) Opt {
+func withNegativeCache(size int) Opt {
 	return func(rl *RateLimit) {
 		rl.ncache.Resize(size)
 	}
@@ -108,7 +104,14 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 	if cfg.TableName == "" {
 		return nil, errors.New("table_name in config is empty")
 	}
-	l := newLimiter(cfg.TableName, bucket, client, opts...)
+
+	addOpts, err := cfgToOpts(cfg.AdditionalConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	addOpts = append(addOpts, opts...)
+	l := newLimiter(cfg.TableName, bucket, client, addOpts...)
 	return l, nil
 }
 

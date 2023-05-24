@@ -25,6 +25,24 @@ func TestNewConfig(t *testing.T) {
 				Interval:         60 * time.Second,
 			},
 		},
+		{
+			name:     "parse config file",
+			filename: "test-add-config.yaml",
+			want: &Config{
+				TableName:        "dummy_table",
+				BucketSize:       40,
+				TokenPerInterval: 20,
+				Interval:         60 * time.Second,
+				AdditionalConfig: &AdditionalConfig{
+					NegativeCache: &NegativeCacheConfig{
+						Size: 2,
+					},
+					Anonymous: &AnonymousConfig{
+						RecordTTL: 24 * time.Hour,
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

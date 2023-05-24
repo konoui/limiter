@@ -94,6 +94,11 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 		BucketSize:       2 * 2,
 		Interval:         3 * time.Second,
 		TableName:        "dummy_table",
+		AdditionalConfig: &AdditionalConfig{
+			NegativeCache: &NegativeCacheConfig{
+				Size: 0,
+			},
+		},
 	}
 	tests := []struct {
 		name       string
@@ -295,7 +300,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			tt.mocker(client)
 
 			out := &bytes.Buffer{}
-			rl, err := New(&cfg, client, WithEMFMetrics(out), WithNegativeCache(0))
+			rl, err := New(&cfg, client, WithEMFMetrics(out))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -328,6 +333,11 @@ func TestRateLimit_ShouldThrottleWithNegativeCache(t *testing.T) {
 		BucketSize:       2 * 2,
 		Interval:         3 * time.Second,
 		TableName:        "dummy_table",
+		AdditionalConfig: &AdditionalConfig{
+			NegativeCache: &NegativeCacheConfig{
+				Size: 2,
+			},
+		},
 	}
 
 	ctrl := gomock.NewController(t)
@@ -337,7 +347,7 @@ func TestRateLimit_ShouldThrottleWithNegativeCache(t *testing.T) {
 		GetItem(gomock.Any(), gomock.Any()).
 		Return(&dynamodb.GetItemOutput{}, nil)
 
-	l, err := New(&cfg, client, WithNegativeCache(2))
+	l, err := New(&cfg, client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,17 +370,23 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 	t.Run("anonymous", func(t *testing.T) {
 		t.Cleanup(func() { timeNow = time.Now })
 
+		timeNow = myNow(0)
+		ttl := 24 * time.Hour
+		wantTTL := timeNow().Unix() + int64(ttl.Seconds())
+
 		ctx := context.Background()
 		cfg := &Config{
 			TokenPerInterval: 2,
 			BucketSize:       2 * 2,
 			Interval:         3 * time.Second,
+			AdditionalConfig: &AdditionalConfig{
+				Anonymous: &AnonymousConfig{
+					RecordTTL: ttl,
+				},
+			},
 		}
 
-		timeNow = myNow(0)
-		ttl := 24 * time.Hour
-		wantTTL := timeNow().Unix() + int64(ttl.Seconds())
-		l := testRateLimit(t, cfg, WithAnonymous(ttl))
+		l := testRateLimit(t, cfg)
 		id := int64String(int64(pickIndex(100000)))
 
 		t.Logf("bucket-id %s\n", id)
