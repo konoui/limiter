@@ -156,6 +156,7 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 	return l.shouldThrottle(ctx, bucketID, shardID)
 }
 
+// TODO handle bucket id and shard id for structured logging
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (bool, error) {
 	// first, validate bucket id
 	if l.maxLength < len(bucketID) {

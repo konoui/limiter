@@ -1,0 +1,13 @@
+default:
+  table_name: "test_table"
+  token_per_interval: 10
+  bucket_size: 20
+  interval: 60s
+anon:
+  table_name: "test_table"
+  token_per_interval: 1
+  bucket_size: 2
+  interval: 60s
+  additional:
+    anonymous:
+      record_ttl: 24h

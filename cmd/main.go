@@ -18,13 +18,17 @@ const (
 	envConfigFilepath = "LIMITER_CONFIG_FILEPATH"
 )
 
-func NewRootCmd(rl *limiter.RateLimit) *cobra.Command {
+func NewRootCmd(rl map[string]*limiter.RateLimit) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:  "limiter",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if rl != nil {
-				return start("", rl, "x-api-key")
+				mux, err := testHandler(rl)
+				if err != nil {
+					return err
+				}
+				return StartServer("", mux)
 			}
 			return fmt.Errorf("non lambda environment")
 		},
@@ -56,14 +60,19 @@ func NewCreateTableCmd(c *dynamodb.Client) *cobra.Command {
 }
 
 func NewCreateToken(c *dynamodb.Client) *cobra.Command {
-	var filepath string
+	var fpath, key string
 	cmd := &cobra.Command{
 		Use:  "create-token",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rl, err := newLimiter(filepath, c)
+			r, err := newLimiters(fpath, c)
 			if err != nil {
 				return err
+			}
+
+			rl, ok := r[key]
+			if !ok {
+				return fmt.Errorf("%s does not exist in %s", key, fpath)
 			}
 
 			uid, err := uuid.NewRandom()
@@ -77,10 +86,13 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 
 			fmt.Fprintf(cmd.OutOrStdout(), "new token: %s", uid.String())
 			return nil
+
 		},
 	}
-	cmd.PersistentFlags().StringVar(&filepath, "config-file", "", "config file path")
+	cmd.PersistentFlags().StringVar(&key, "config-name", "", "config name in the config file")
+	cmd.PersistentFlags().StringVar(&fpath, "config-file", "", "config file path")
 	_ = cmd.MarkPersistentFlagRequired("config-file")
+	_ = cmd.MarkPersistentFlagRequired("config-name")
 	return cmd
 }
 
@@ -90,11 +102,15 @@ func NewStartServer(c *dynamodb.Client) *cobra.Command {
 		Use:  "start-server",
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rl, err := newLimiter(filepath, c)
+			rl, err := newLimiters(filepath, c)
 			if err != nil {
 				return err
 			}
-			return start(":8080", rl, "x-api-key")
+			mux, err := testHandler(rl)
+			if err != nil {
+				return err
+			}
+			return StartServer(":8080", mux)
 		},
 		SilenceUsage:       true,
 		DisableSuggestions: true,
@@ -146,16 +162,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	var rl *limiter.RateLimit
+	var r map[string]*limiter.RateLimit
 	if _, ok := os.LookupEnv(envRunOnLambda); ok {
-		rl, err = newLimiter(os.Getenv(envConfigFilepath), c)
+		r, err = newLimiters(os.Getenv(envConfigFilepath), c)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 	}
 
-	rootCmd := NewRootCmd(rl)
+	rootCmd := NewRootCmd(r)
 	rootCmd.AddCommand(
 		NewCreateTableCmd(c),
 		NewCreateToken(c),
@@ -168,17 +184,26 @@ func main() {
 	}
 }
 
-func newLimiter(filepath string, client *dynamodb.Client) (*limiter.RateLimit, error) {
+func newLimiters(filepath string, client *dynamodb.Client) (map[string]*limiter.RateLimit, error) {
 	f, err := os.Open(filepath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	cfg, err := limiter.NewConfig(f)
+	cfg, err := NewConfig(f)
 	if err != nil {
 		return nil, err
 	}
 
-	return limiter.New(cfg, client)
+	ret := map[string]*limiter.RateLimit{}
+	for key, v := range cfg {
+		rl, err := limiter.New(v, client)
+		if err != nil {
+			return nil, err
+		}
+		ret[key] = rl
+	}
+
+	return ret, err
 }
