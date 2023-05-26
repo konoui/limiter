@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,10 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	mock "github.com/konoui/limiter/mock_limiter"
+	"golang.org/x/exp/slog"
 )
+
+var logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 
 func testClient(t *testing.T) *dynamodb.Client {
 	t.Helper()
@@ -402,7 +406,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 			return
 		}
 
-		item, _ := l.getItem(ctx, id, 0)
+		item, _ := l.getItem(ctx, slog.Default(), id, 0)
 		if item.TTL != wantTTL {
 			t.Errorf("unexpected ttl: want: %d, got: %d", wantTTL, item.TTL)
 		}
@@ -442,7 +446,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 			t.Errorf("unexpected throttle error %v", err)
 		}
 		if !throttled {
-			item, _ := l.getItem(context.Background(), id, 0)
+			item, _ := l.getItem(context.Background(), logger, id, 0)
 			t.Errorf("should non throttle: %v", item.TokenCount)
 		}
 
@@ -450,7 +454,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		// 0 + base
 		timeNow = myNow(cfg.Interval)
 		t.Logf("getToken %v\n", timeNow().UnixMilli())
-		token, err := l.getToken(ctx, id, 0)
+		token, err := l.getToken(ctx, logger, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
@@ -462,7 +466,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		// base -1 + base
 		timeNow = myNow(cfg.Interval * 2)
 		t.Logf("getToken %v\n", timeNow().UnixMilli())
-		token, err = l.getToken(ctx, id, 0)
+		token, err = l.getToken(ctx, logger, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}
@@ -473,7 +477,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 		// wait interval and refill
 		timeNow = myNow(cfg.Interval * 3)
 		t.Logf("getToken %v\n", timeNow().UnixMilli())
-		token, err = l.getToken(ctx, id, 0)
+		token, err = l.getToken(ctx, logger, id, 0)
 		if err != nil {
 			t.Errorf("get-token error %v", err)
 		}

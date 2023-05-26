@@ -10,12 +10,21 @@ import (
 	"github.com/google/uuid"
 	"github.com/konoui/limiter"
 	"github.com/spf13/cobra"
+	"golang.org/x/exp/slog"
 )
 
 const (
 	// https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
 	envRunOnLambda    = "AWS_LAMBDA_FUNCTION_NAME"
 	envConfigFilepath = "LIMITER_CONFIG_FILEPATH"
+)
+
+var (
+	logger = slog.New(slog.NewJSONHandler(
+		os.Stdout,
+		&slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}))
 )
 
 func NewRootCmd(rl map[string]*limiter.RateLimit) *cobra.Command {
@@ -198,7 +207,7 @@ func newLimiters(filepath string, client *dynamodb.Client) (map[string]*limiter.
 
 	ret := map[string]*limiter.RateLimit{}
 	for key, v := range cfg {
-		rl, err := limiter.New(v, client)
+		rl, err := limiter.New(v, client, limiter.WithLogger(logger))
 		if err != nil {
 			return nil, err
 		}

@@ -1,6 +1,9 @@
 GOLANGCI_LINT_VERSION := v1.51.0
 export GO111MODULE=on
 
+build:
+	CGO_ENABLED=0 GOARCH=arm64 go build -ldflags "$(LDFLAGS) -s -w" -o ./bin/main ./cmd
+
 lint:
 	@(if ! type golangci-lint >/dev/null 2>&1; then curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin ${GOLANGCI_LINT_VERSION} ;fi)
 	golangci-lint run ./...
@@ -15,9 +18,6 @@ generate:
 test:
 	go test ./...
 	
-build:
-	CGO_ENABLED=0 GOARCH=arm64 go build -ldflags "$(LDFLAGS) -s -w" -o ./bin/main ./cmd
-
 cover:
 	go test -coverpkg=./... -coverprofile=cover.out ./...
 	go tool cover -html=cover.out -o cover.html

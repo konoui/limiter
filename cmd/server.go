@@ -73,7 +73,7 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 
 func StartServer(addr string, handler http.Handler) error {
 	if addr != "" {
-		log.Println("starting")
+		logger.Info("starting")
 		server := &http.Server{
 			Addr:              addr,
 			ReadHeaderTimeout: 3 * time.Second,
