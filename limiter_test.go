@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -576,5 +577,53 @@ func writeTestFile(t *testing.T, data, filename string) {
 	err := os.WriteFile(filepath.Join("testdata", filename), []byte(data), 0600)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func Test_splitPartitionKey(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantBucketID string
+		wantShardID  string
+		wantErr      bool
+	}{
+		{
+			name:         "input",
+			input:        fmt.Sprintf("test%s1", delimiter),
+			wantBucketID: "test",
+			wantShardID:  "1",
+		},
+		{
+			name:         "check last index",
+			input:        fmt.Sprintf("test%sa%s1", delimiter, delimiter),
+			wantBucketID: "test#a",
+			wantShardID:  "1",
+		},
+		{
+			name:    "invalid input",
+			input:   fmt.Sprintf("test%s", delimiter),
+			wantErr: true,
+		},
+		{
+			name:    "invalid input",
+			input:   "test",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBucketID, gotShardID, err := splitPartitionKey(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("splitPartitionKey() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if gotBucketID != tt.wantBucketID {
+				t.Errorf("splitPartitionKey() gotBucketID = %v, want %v", gotBucketID, tt.wantBucketID)
+			}
+			if gotShardID != tt.wantShardID {
+				t.Errorf("splitPartitionKey() gotShardID = %v, want %v", gotShardID, tt.wantShardID)
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -442,10 +443,6 @@ func int64String(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
 
-func makePartitionKey(bucketID string, shardID int64) string {
-	return fmt.Sprintf("%s%s%d", bucketID, delimiter, shardID)
-}
-
 func buildPartitionKey(bucketID string, shardID int64) map[string]types.AttributeValue {
 	bucketIDShardID := makePartitionKey(bucketID, shardID)
 	return map[string]types.AttributeValue{
@@ -453,6 +450,27 @@ func buildPartitionKey(bucketID string, shardID int64) map[string]types.Attribut
 			Value: bucketIDShardID,
 		},
 	}
+}
+
+func makePartitionKey(bucketID string, shardID int64) string {
+	return fmt.Sprintf("%s%s%d", bucketID, delimiter, shardID)
+}
+
+func splitPartitionKey(bucketIDShardID string) (bucketID, shardID string, _ error) {
+	idx := strings.LastIndex(bucketIDShardID, delimiter)
+	invalidErr := fmt.Errorf("unexpected partition key: %s", bucketIDShardID)
+	if idx <= 0 {
+		return "", "", invalidErr
+
+	}
+
+	bucketID = bucketIDShardID[:idx]
+	shardID = bucketIDShardID[idx+1:]
+	if bucketID == "" || shardID == "" {
+		return "", "", invalidErr
+	}
+
+	return bucketIDShardID[:idx], bucketIDShardID[idx+1:], nil
 }
 
 func CreateTable(ctx context.Context, tableName string, client *dynamodb.Client) error {
