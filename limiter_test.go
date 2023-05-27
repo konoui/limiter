@@ -117,9 +117,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "throttle when time is not passed and existing token is zero",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         0,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().UnixMilli(),
+					TokenCount:  0,
+					LastUpdated: timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -144,9 +143,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "not throttle when token is refilled due to passed time",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         0,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+					TokenCount:  0,
+					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -172,9 +170,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "throttle when updateItem of refillToken returns DDB API rate limit exceeded",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         1,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().UnixMilli(),
+					TokenCount:  1,
+					LastUpdated: timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -191,9 +188,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken succeeded then one token is available at least",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         0,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+					TokenCount:  0,
+					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -212,9 +208,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns zero token",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         1,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+					TokenCount:  1,
+					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -234,9 +229,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "throttle if updateItem of refillToken returns an internal error",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         2,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+					TokenCount:  2,
+					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -254,9 +248,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				msg := aws.String("CCF")
 				item := &ddbItem{
-					TokenCount:         1,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().Add(-cfg.Interval).UnixMilli(),
+					TokenCount:  1,
+					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -276,9 +269,8 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			name: "throttle if updateItem of subtractToken returns CCF then token run out",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
-					TokenCount:         1,
-					BucketSizePerShard: cfg.BucketSize,
-					LastUpdated:        timeNow().UnixMilli(),
+					TokenCount:  1,
+					LastUpdated: timeNow().UnixMilli(),
 				}
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
@@ -554,10 +546,9 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 				tableName: "dummy",
 			}
 			got := l.calculateRefillToken(&ddbItem{
-				LastUpdated:        now.Add(-tt.wait).UnixMilli(),
-				BucketSizePerShard: tt.base * 2,
-				TokenCount:         tt.cur,
-				shardID:            0,
+				LastUpdated: now.Add(-tt.wait).UnixMilli(),
+				TokenCount:  tt.cur,
+				shardID:     0,
 			}, now.UnixMilli())
 
 			if got != tt.want {

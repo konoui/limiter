@@ -29,7 +29,6 @@ var (
 	_                   LimitPreparer = &RateLimit{}
 	attrBucketIDShardID               = "bucket_id_shard_id"
 	attrTTL                           = "ttl"
-	attrBucketPerShard                = "bucket_size_per_shard"
 )
 
 const (
@@ -66,11 +65,10 @@ type ddbItem struct {
 	BucketIDShardID string `dynamodbav:"bucket_id_shard_id" json:"bucket_id_shard_id"`
 	TokenCount      int64  `dynamodbav:"token_count" json:"token_count"`
 	// milliseconds unix timestamp
-	LastUpdated        int64 `dynamodbav:"last_updated" json:"last_updated"`
-	BucketSizePerShard int64 `dynamodbav:"bucket_size_per_shard" json:"bucket_size_per_shard"`
-	TTL                int64 `dynamodbav:"ttl" json:"ttl"`
-	shardID            int64
-	bucketID           string
+	LastUpdated int64 `dynamodbav:"last_updated" json:"last_updated"`
+	TTL         int64 `dynamodbav:"ttl" json:"ttl"`
+	shardID     int64
+	bucketID    string
 }
 
 type Opt func(rl *RateLimit)
@@ -239,7 +237,7 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 	switch {
 	case refillTokenCount > 0:
 		// store subtracted token as a token will be used for get-token
-		err := l.refillToken(ctx, logger, bucketID, shardID, item.BucketSizePerShard, refillTokenCount-1, item.LastUpdated, now)
+		err := l.refillToken(ctx, logger, bucketID, shardID, refillTokenCount-1, item.LastUpdated, now)
 		if err != nil {
 			if isErrConditionalCheckFailed(err) {
 				// fallback to subtract, when succeeded, available one token at least.
@@ -314,9 +312,8 @@ func (l *RateLimit) getItem(ctx context.Context, logger *slog.Logger, bucketID s
 				LastUpdated: timeNow().
 					Add(-l.bucket.interval * time.Duration(l.bucket.bucketSizePerShard[shardID])).
 					UnixMilli(),
-				BucketSizePerShard: l.bucket.bucketSizePerShard[shardID],
-				bucketID:           bucketID,
-				shardID:            shardID,
+				bucketID: bucketID,
+				shardID:  shardID,
 			}
 			logger.DebugCtx(ctx, "created ddb item for anonymous mode", slog.Any("ddb_item", i))
 			return i, nil
@@ -342,7 +339,7 @@ func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 		return 0
 	}
 	refill := l.bucket.tokensPerShardPerInterval[item.shardID] * int64(num)
-	burstable := item.BucketSizePerShard - item.TokenCount
+	burstable := l.bucket.bucketSizePerShard[item.shardID] - item.TokenCount
 	if refill > burstable {
 		return burstable
 	}
@@ -351,7 +348,8 @@ func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 
 // refillToken if return an error of ConditionalCheckFailedException, this means other request has been accepted before this request
 func (l *RateLimit) refillToken(ctx context.Context, _ *slog.Logger,
-	bucketID string, shardID, shardBurstSize, refillTokenCount, lastUpdated, now int64) error {
+	bucketID string, shardID, refillTokenCount, lastUpdated, now int64) error {
+	shardBurstSize := l.bucket.bucketSizePerShard[shardID]
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
 	// Check last_updated is equal to last_updated of got item to achieve strong write consistency.
 	// Other refillToken request is accepted before this, it will cause ConditionalCheckFailedException.
@@ -360,7 +358,7 @@ func (l *RateLimit) refillToken(ctx context.Context, _ *slog.Logger,
 	condUpdated := expression.Name("last_updated").
 		Equal(expression.Value(lastUpdated)).
 		And(
-			// token_count < burst size
+			// token_count < burstable size
 			expression.ConditionBuilder(expression.Name("token_count").
 				LessThan(expression.Value(shardBurstSize))),
 		)
@@ -371,7 +369,7 @@ func (l *RateLimit) refillToken(ctx context.Context, _ *slog.Logger,
 		Add(
 			expression.Name("token_count"), expression.Value(refillTokenCount),
 		)
-	updateExpr = l.updateTTLExpr(updateExpr, shardID, now)
+	updateExpr = l.updateTTLExpr(updateExpr, now)
 
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
@@ -410,7 +408,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, _ *slog.Logger, bucketID 
 			expression.Name("token_count"),
 			expression.Value(-1),
 		)
-	updateExpr = l.updateTTLExpr(updateExpr, shardID, now)
+	updateExpr = l.updateTTLExpr(updateExpr, now)
 
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
@@ -435,15 +433,12 @@ func (l *RateLimit) subtractToken(ctx context.Context, _ *slog.Logger, bucketID 
 	return nil
 }
 
-func (l *RateLimit) updateTTLExpr(expr expression.UpdateBuilder, shardID int64, now int64) expression.UpdateBuilder {
+func (l *RateLimit) updateTTLExpr(expr expression.UpdateBuilder, now int64) expression.UpdateBuilder {
 	if l.ttl > 0 {
 		expr = expr.Set(
 			expression.Name(attrTTL),
 			// second unix timestamp
 			expression.Value(time.UnixMilli(now).Unix()+int64(l.ttl.Seconds())),
-		).Set(
-			expression.Name(attrBucketPerShard),
-			expression.Value(l.bucket.bucketSizePerShard[shardID]),
 		)
 	}
 	return expr
@@ -468,10 +463,9 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 	requests := make([]types.WriteRequest, 0, len(shards))
 	for _, shardID := range shards {
 		item := &ddbItem{
-			BucketIDShardID:    makePartitionKey(bucketID, shardID),
-			LastUpdated:        now,
-			TokenCount:         l.bucket.bucketSizePerShard[shardID],
-			BucketSizePerShard: l.bucket.bucketSizePerShard[shardID],
+			BucketIDShardID: makePartitionKey(bucketID, shardID),
+			LastUpdated:     now,
+			TokenCount:      l.bucket.bucketSizePerShard[shardID],
 		}
 		attrs, err := attributevalue.MarshalMap(item)
 		if err != nil {
