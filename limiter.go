@@ -76,6 +76,7 @@ type Opt func(rl *RateLimit)
 func WithEMFMetrics(w io.Writer) Opt {
 	return func(rl *RateLimit) {
 		rl.metricOut = w
+		rl.client = newWrapDDBClient(rl.client, rl.metricOut)
 	}
 }
 
@@ -128,6 +129,7 @@ func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt
 	l := &RateLimit{
 		bucket:    bucket,
 		tableName: table,
+		client:    client,
 		metricOut: io.Discard,
 		ncache:    defaultCache,
 		maxLength: 512, // a WCU is 1kib basis
@@ -140,7 +142,6 @@ func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt
 		}
 	}
 
-	l.client = newWrapDDBClient(client, l.metricOut)
 	return l
 }
 
@@ -167,7 +168,6 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 	return l.shouldThrottle(ctx, bucketID, shardID)
 }
 
-// TODO handle bucket id and shard id for structured logging
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (throttled bool, err error) {
 	logger := l.baseLogger.With(
 		slog.String("table_name", l.tableName),
@@ -177,14 +177,12 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 	)
 	defer func() { logger.DebugCtx(ctx, fmt.Sprintf("result throttled: %v", throttled)) }()
 
-	// first, validate bucket id
 	if l.maxLength < len(bucketID) {
 		return true, fmt.Errorf("exceeded maximum bucket id length %d: %w", l.maxLength, ErrInvalidBucketID)
 	}
 
-	// second search from negative cache
 	if bucketID != "" && l.ncache.Contains(bucketID) {
-		return true, fmt.Errorf("found %s in negative cache: %w", bucketID, ErrInvalidBucketID)
+		return true, fmt.Errorf("found in negative cache: %w", ErrInvalidBucketID)
 	}
 
 	token, err := l.getToken(ctx, logger, bucketID, shardID)
@@ -198,7 +196,7 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 
 	// add negative cache and early return
 	if errors.Is(err, ErrInvalidBucketID) {
-		logger.DebugCtx(ctx, "adding bucket_id into the negative cache")
+		logger.DebugCtx(ctx, "adding into the negative cache")
 		l.ncache.Add(bucketID, nil)
 		return true, err
 	}
@@ -216,7 +214,7 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 	return throttle, err
 }
 
-// getToken return available tokens. it will tell dynamodb errors to the caller.
+// getToken consumes tokens and returns available tokens. it will tell dynamodb errors to the caller.
 func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID string, shardID int64) (count int64, err error) {
 	item, err := l.getItem(ctx, logger, bucketID, shardID)
 	if err != nil {
@@ -241,27 +239,27 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 		if err != nil {
 			if isErrConditionalCheckFailed(err) {
 				// fallback to subtract, when succeeded, available one token at least.
-				logger.DebugCtx(ctx, "refill-token failed due to conditional check failed. fallback to subtract-token")
+				logger.DebugCtx(ctx, "refill-token failed due to conditional check failed, fallbacking to subtract-token")
 				if err := l.subtractToken(ctx, logger, bucketID, shardID, now); err != nil {
 					if isErrConditionalCheckFailed(err) {
 						// if ConditionalCheckFailedException, it means tokens run out by other request.
-						logger.DebugCtx(ctx, "available token is zero as subtract-token for fallback failed due to conditional check failed.")
+						logger.DebugCtx(ctx, "tokens run out: subtract-token for the fallback failed due to conditional check failed")
 						return 0, err
 					}
 					// an internal error at subtractToken
-					logger.ErrorCtx(ctx, fmt.Sprintf("subtract-token encountered unexpected error: %v", err))
+					logger.ErrorCtx(ctx, fmt.Sprintf("subtract-token encountered an unexpected error: %v", err))
 					return 0, errors.Join(err, ErrInternal)
 				}
 				// subtractToken successfully
-				logger.DebugCtx(ctx, "subtract-token for fallback succeeded")
+				logger.DebugCtx(ctx, "subtract-token succeeded")
 				return 1, err
 			}
 			// an internal error at refillToken
-			logger.ErrorCtx(ctx, fmt.Sprintf("refill-token encountered unexpected error: %v", err))
+			logger.ErrorCtx(ctx, fmt.Sprintf("refill-token encountered an unexpected error: %v", err))
 			return 0, errors.Join(err, ErrInternal)
 		}
 		// available token are current token count + refill token count
-		logger.DebugCtx(ctx, "refill-token for fallback succeeded")
+		logger.DebugCtx(ctx, "refill-token succeeded")
 		return token + refillTokenCount, nil
 	case token > 0:
 		err := l.subtractToken(ctx, logger, bucketID, shardID, now)
@@ -272,7 +270,7 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 				return 0, err
 			}
 			// an internal error at subtractToken
-			logger.ErrorCtx(ctx, fmt.Sprintf("subtract-token encountered unexpected error: %v", err))
+			logger.ErrorCtx(ctx, fmt.Sprintf("subtract-token encountered an unexpected error: %v", err))
 			return 0, errors.Join(err, ErrInternal)
 		}
 		logger.DebugCtx(ctx, "subtract-token succeeded")
@@ -289,16 +287,11 @@ func (l *RateLimit) getItem(ctx context.Context, logger *slog.Logger, bucketID s
 		TableName: &l.tableName,
 	}
 	resp, err := l.client.GetItem(ctx, input)
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("get_item_request_id", requestID))
 	if err != nil {
 		logger.ErrorCtx(ctx, fmt.Sprintf("get-item failed: %v", err))
 		return nil, fmt.Errorf("get-item: %w", err)
-	}
-
-	// TODO
-	// add dynamodb context
-	requestID, ok := middleware.GetRequestIDMetadata(resp.ResultMetadata)
-	if ok {
-		*logger = *logger.With(slog.String("ddb_get_item_request_id", requestID))
 	}
 
 	// check registered token or not
@@ -318,12 +311,14 @@ func (l *RateLimit) getItem(ctx context.Context, logger *slog.Logger, bucketID s
 			logger.DebugCtx(ctx, "created ddb item for anonymous mode", slog.Any("ddb_item", i))
 			return i, nil
 		}
+
 		logger.DebugCtx(ctx, "unregistered bucket id")
 		return nil, fmt.Errorf("unregistered bucket id: %w", ErrInvalidBucketID)
 	}
 
 	item := new(ddbItem)
 	if err := attributevalue.UnmarshalMap(resp.Item, item); err != nil {
+		logger.ErrorCtx(ctx, fmt.Sprintf("get-item unmarshal failed: %v", err))
 		return nil, err
 	}
 
@@ -347,7 +342,7 @@ func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
 }
 
 // refillToken if return an error of ConditionalCheckFailedException, this means other request has been accepted before this request
-func (l *RateLimit) refillToken(ctx context.Context, _ *slog.Logger,
+func (l *RateLimit) refillToken(ctx context.Context, logger *slog.Logger,
 	bucketID string, shardID, refillTokenCount, lastUpdated, now int64) error {
 	shardBurstSize := l.bucket.bucketSizePerShard[shardID]
 	condNotExist := expression.Name("bucket_id").AttributeNotExists()
@@ -373,6 +368,7 @@ func (l *RateLimit) refillToken(ctx context.Context, _ *slog.Logger,
 
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
 	if err != nil {
+		logger.ErrorCtx(ctx, fmt.Sprintf("refill build failed: %v", err))
 		return fmt.Errorf("refill build: %w", err)
 	}
 	input := &dynamodb.UpdateItemInput{
@@ -385,17 +381,21 @@ func (l *RateLimit) refillToken(ctx context.Context, _ *slog.Logger,
 		ReturnValues:              types.ReturnValueNone,
 	}
 
-	_, err = l.client.UpdateItem(ctx, input)
+	resp, err := l.client.UpdateItem(ctx, input)
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("refill_token_request_id", requestID), slog.Any("input", input))
 	if err != nil {
 		// TODO return custom error if CCF
+		logger.DebugCtx(ctx, "refill-token failed: %w")
 		return fmt.Errorf("refill-token: %w", err)
 	}
 
+	logger.DebugCtx(ctx, "refill-token succeeded")
 	return nil
 }
 
 // subtractToken if return an error of ConditionalCheckFailedException, this means token has been zero by other request.
-func (l *RateLimit) subtractToken(ctx context.Context, _ *slog.Logger, bucketID string, shardID, now int64) error {
+func (l *RateLimit) subtractToken(ctx context.Context, logger *slog.Logger, bucketID string, shardID, now int64) error {
 	// if other request subtract token before this and token run out, ConditionalCheckFailedException will occur.
 	// No handling the error here
 	// "token_count > :min_val"
@@ -424,12 +424,16 @@ func (l *RateLimit) subtractToken(ctx context.Context, _ *slog.Logger, bucketID 
 		ReturnValues:              types.ReturnValueNone,
 	}
 
-	_, err = l.client.UpdateItem(ctx, input)
+	resp, err := l.client.UpdateItem(ctx, input)
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("subtract_token_request_id", requestID), slog.Any("input", input))
 	if err != nil {
 		// TODO return custom error if CCF
+		logger.DebugCtx(ctx, "subtract-token failed: %w")
 		return fmt.Errorf("subtract-item: %w", err)
 	}
 
+	logger.DebugCtx(ctx, "subtract-token succeeded")
 	return nil
 }
 
@@ -448,18 +452,21 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err err
 	shards := l.bucket.makeShards()
 	now := timeNow().UnixMilli()
 	batchSize := 25
+
+	logger := l.baseLogger.With(slog.String("bucket_id", bucketID))
+	logger.DebugCtx(ctx, fmt.Sprintf("distribute %d shards", len(shards)))
 	for i := 0; i < len(shards); i += batchSize {
 		if len(shards) < batchSize+i {
-			return l.prepareTokens(ctx, bucketID, now, shards[i:])
+			return l.prepareTokens(ctx, logger, bucketID, now, shards[i:])
 		}
-		if err := l.prepareTokens(ctx, bucketID, now, shards[i:i+batchSize]); err != nil {
+		if err := l.prepareTokens(ctx, logger, bucketID, now, shards[i:i+batchSize]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int64, shards []int64) error {
+func (l *RateLimit) prepareTokens(ctx context.Context, logger *slog.Logger, bucketID string, now int64, shards []int64) error {
 	requests := make([]types.WriteRequest, 0, len(shards))
 	for _, shardID := range shards {
 		item := &ddbItem{
@@ -483,10 +490,15 @@ func (l *RateLimit) prepareTokens(ctx context.Context, bucketID string, now int6
 		},
 	}
 
-	_, err := l.client.BatchWriteItem(ctx, input)
+	resp, err := l.client.BatchWriteItem(ctx, input)
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("prepare_token_batch_write_request_id", requestID))
 	if err != nil {
+		logger.DebugCtx(ctx, "prepare token batch write failed")
 		return fmt.Errorf("prepare-tokens: %w", err)
 	}
+
+	logger.DebugCtx(ctx, "prepare token batch write succeeded")
 	return nil
 }
 

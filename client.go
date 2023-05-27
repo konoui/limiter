@@ -42,7 +42,12 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context,
 			outputLog(c.metricOut, buildDDBThrottleMetric(*input.TableName, "UpdateItem", bid, sid))
 		}
 	}()
-	return c.c.UpdateItem(ctx, input, params...)
+
+	resp, err := c.c.UpdateItem(ctx, input, params...)
+	if resp == nil {
+		resp = new(dynamodb.UpdateItemOutput)
+	}
+	return resp, err
 }
 
 func (c *wrappedDDBClient) GetItem(ctx context.Context,
@@ -59,7 +64,12 @@ func (c *wrappedDDBClient) GetItem(ctx context.Context,
 			outputLog(c.metricOut, buildDDBThrottleMetric(*input.TableName, "GetItem", bid, sid))
 		}
 	}()
-	return c.c.GetItem(ctx, input, params...)
+
+	resp, err := c.c.GetItem(ctx, input, params...)
+	if resp == nil {
+		resp = new(dynamodb.GetItemOutput)
+	}
+	return resp, err
 }
 
 func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context,
