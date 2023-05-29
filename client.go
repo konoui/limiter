@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"golang.org/x/exp/slog"
 )
 
 //go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
@@ -28,7 +30,7 @@ func newWrapDDBClient(client DDBClient, w io.Writer) *wrappedDDBClient {
 	return &wrappedDDBClient{c: client, metricOut: w}
 }
 
-func (c *wrappedDDBClient) UpdateItem(ctx context.Context,
+func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
 	input *dynamodb.UpdateItemInput,
 	params ...func(*dynamodb.Options)) (_ *dynamodb.UpdateItemOutput, err error) {
 	defer func() {
@@ -45,12 +47,16 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context,
 
 	resp, err := c.c.UpdateItem(ctx, input, params...)
 	if resp == nil {
-		resp = new(dynamodb.UpdateItemOutput)
+		return resp, err
 	}
+
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("ddb_request_id", requestID))
+	logger.DebugCtx(ctx, "update-item response", slog.Any("input", input), slog.Any("output", resp))
 	return resp, err
 }
 
-func (c *wrappedDDBClient) GetItem(ctx context.Context,
+func (c *wrappedDDBClient) GetItem(ctx context.Context, logger *slog.Logger,
 	input *dynamodb.GetItemInput,
 	params ...func(*dynamodb.Options)) (out *dynamodb.GetItemOutput, err error) {
 	defer func() {
@@ -67,12 +73,16 @@ func (c *wrappedDDBClient) GetItem(ctx context.Context,
 
 	resp, err := c.c.GetItem(ctx, input, params...)
 	if resp == nil {
-		resp = new(dynamodb.GetItemOutput)
+		return resp, err
 	}
+
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("ddb_request_id", requestID))
+	logger.DebugCtx(ctx, "get-item response", slog.Any("input", input), slog.Any("output", resp))
 	return resp, err
 }
 
-func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context,
+func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context, logger *slog.Logger,
 	input *dynamodb.BatchWriteItemInput,
 	params ...func(*dynamodb.Options)) (out *dynamodb.BatchWriteItemOutput, err error) {
 	defer func() {
@@ -93,7 +103,16 @@ func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context,
 			}
 		}
 	}()
-	return c.c.BatchWriteItem(ctx, input, params...)
+
+	resp, err := c.c.BatchWriteItem(ctx, input, params...)
+	if resp == nil {
+		return resp, err
+	}
+
+	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
+	logger = logger.With(slog.String("ddb_request_id", requestID))
+	logger.DebugCtx(ctx, "batch-write-item response", slog.Any("input", input), slog.Any("output", resp))
+	return resp, err
 }
 
 func getKeys(attr map[string]types.AttributeValue) (bucketID string, shardID string, err error) {

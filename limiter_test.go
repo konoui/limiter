@@ -398,7 +398,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 			return
 		}
 
-		item, _ := l.getItem(ctx, slog.Default(), id, 0)
+		item, _ := l.getTokenItem(ctx, slog.Default(), id, 0)
 		if item.TTL != wantTTL {
 			t.Errorf("unexpected ttl: want: %d, got: %d", wantTTL, item.TTL)
 		}
@@ -438,7 +438,7 @@ func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
 			t.Errorf("unexpected throttle error %v", err)
 		}
 		if !throttled {
-			item, _ := l.getItem(context.Background(), logger, id, 0)
+			item, _ := l.getTokenItem(context.Background(), logger, id, 0)
 			t.Errorf("should non throttle: %v", item.TokenCount)
 		}
 
