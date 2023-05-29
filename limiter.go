@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -490,8 +491,7 @@ func (l *RateLimit) prepareTokens(ctx context.Context, logger *slog.Logger, buck
 		},
 	}
 
-	// TODO handle resp.UnprocessedItems
-	_, err := l.client.BatchWriteItem(ctx, logger, input)
+	err := l.retryBatchWriteItem(ctx, logger, input)
 	if err != nil {
 		logger.DebugCtx(ctx, "prepare tokens failed")
 		return fmt.Errorf("prepare-tokens: %w", err)
@@ -499,6 +499,31 @@ func (l *RateLimit) prepareTokens(ctx context.Context, logger *slog.Logger, buck
 
 	logger.DebugCtx(ctx, "prepare tokens succeeded")
 	return nil
+}
+
+func (l *RateLimit) retryBatchWriteItem(ctx context.Context, logger *slog.Logger, input *dynamodb.BatchWriteItemInput) error {
+	b := retry.NewExponentialJitterBackoff(retry.DefaultMaxBackoff)
+	items := input.RequestItems
+	for i := 0; i < retry.DefaultMaxAttempts; i++ {
+		input.RequestItems = items
+		resp, err := l.client.BatchWriteItem(ctx, logger, input)
+		if err != nil {
+			return err
+		}
+
+		// update items
+		items = resp.UnprocessedItems
+		if len(items) == 0 {
+			return nil
+		}
+
+		delay, err := b.BackoffDelay(i, nil)
+		if err != nil {
+			return fmt.Errorf("backoff delay: %w", err)
+		}
+		time.Sleep(delay)
+	}
+	return fmt.Errorf("exceeded maximum retry count")
 }
 
 func int64String(v int64) string {
