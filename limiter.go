@@ -296,7 +296,7 @@ func (l *RateLimit) getTokenItem(ctx context.Context, logger *slog.Logger, bucke
 
 	// check registered token or not
 	if len(resp.Item) == 0 {
-		if l.anonymous {
+		if l.anonymous && l.ttl > 0 {
 			// return temporary token as create operation is executed by refillToken().
 			// avoid to call prepareTokens() API.
 			i := &ddbItem{
@@ -436,7 +436,7 @@ func (l *RateLimit) subtractToken(ctx context.Context, logger *slog.Logger, buck
 }
 
 func (l *RateLimit) updateTTLExpr(expr expression.UpdateBuilder, now int64) expression.UpdateBuilder {
-	if l.ttl > 0 {
+	if l.anonymous && l.ttl > 0 {
 		expr = expr.Set(
 			expression.Name(attrTTL),
 			// second unix timestamp
