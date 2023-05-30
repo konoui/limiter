@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/konoui/limiter"
 )
 
@@ -14,8 +13,7 @@ type key struct{}
 type GetKey = func(*http.Request) (string, error)
 
 var (
-	contextKey    = &key{}
-	uuidNewRandom = uuid.NewRandom
+	contextKey = &key{}
 )
 
 type Context struct {
@@ -88,7 +86,7 @@ func NewHandler(rl limiter.Limiter, getKey GetKey) http.HandlerFunc {
 	})
 }
 
-func NewPrepareTokenHandler(rl limiter.Preparer) http.HandlerFunc {
+func NewPrepareTokenHandler(rl limiter.Preparer, generator func() (string, error)) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			lc := &Context{
@@ -99,7 +97,7 @@ func NewPrepareTokenHandler(rl limiter.Preparer) http.HandlerFunc {
 			return
 		}
 
-		uid, err := uuidNewRandom()
+		key, err := generator()
 		if err != nil {
 			lc := &Context{
 				Err:    err,
@@ -109,7 +107,6 @@ func NewPrepareTokenHandler(rl limiter.Preparer) http.HandlerFunc {
 			return
 		}
 
-		key := uid.String()
 		if err := rl.PrepareTokens(r.Context(), key); err != nil {
 			if errors.Is(err, limiter.ErrRateLimitExceeded) {
 				lc := &Context{

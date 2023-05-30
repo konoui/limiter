@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/google/uuid"
 	"github.com/konoui/limiter"
 	"github.com/konoui/limiter/handlerfunc"
 	mock "github.com/konoui/limiter/mock_limiter"
@@ -30,7 +31,14 @@ func MiddlewareLimiter(rl limiter.LimitPreparer, headerKey string, next http.Han
 
 func MiddlewarePrepare(rl limiter.LimitPreparer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := handlerfunc.NewPrepareTokenHandler(rl)
+		generator := func() (string, error) {
+			id, err := uuid.NewRandom()
+			if err != nil {
+				return "", err
+			}
+			return id.String(), nil
+		}
+		h := handlerfunc.NewPrepareTokenHandler(rl, generator)
 		h.ServeHTTP(w, r)
 		next.ServeHTTP(w, r)
 	})

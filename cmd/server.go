@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"time"
@@ -32,7 +31,7 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 
 		defer func() {
 			if c.Err != nil {
-				log.Println("Error", c.Err)
+				logger.Info(c.Err.Error())
 			}
 		}()
 
