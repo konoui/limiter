@@ -53,7 +53,6 @@ type RateLimit struct {
 	client     *wrappedDDBClient
 	bucket     *TokenBucket
 	tableName  string
-	metricOut  io.Writer
 	anonymous  bool
 	ttl        time.Duration
 	ncache     *lru.Cache[string, interface{}]
@@ -75,8 +74,7 @@ type Opt func(rl *RateLimit)
 
 func WithEMFMetrics(w io.Writer) Opt {
 	return func(rl *RateLimit) {
-		rl.metricOut = w
-		rl.client = newWrapDDBClient(rl.client.c, rl.metricOut)
+		rl.client = newWrapDDBClient(rl.client.c, w)
 	}
 }
 
@@ -130,7 +128,6 @@ func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt
 		bucket:    bucket,
 		tableName: table,
 		client:    newWrapDDBClient(client, io.Discard),
-		metricOut: io.Discard,
 		ncache:    defaultCache,
 		maxLength: 512, // a WCU is 1kib basis
 		// disabled by default
@@ -203,7 +200,7 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 
 	// other throttle will be caught here to record metrics
 	if throttle {
-		outputLog(l.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
+		outputLog(l.client.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
 	}
 
 	// ignore ConditionalCheckFailed
