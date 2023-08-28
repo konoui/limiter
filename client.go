@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"io"
 
+	"log/slog"
+
 	"github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"golang.org/x/exp/slog"
 )
 
 //go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
@@ -52,7 +53,7 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
 
 	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
 	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugCtx(ctx, "update-item response", slog.Any("input", input), slog.Any("output", resp))
+	logger.DebugContext(ctx, "update-item response", slog.Any("input", input), slog.Any("output", resp))
 	return resp, err
 }
 
@@ -78,7 +79,7 @@ func (c *wrappedDDBClient) GetItem(ctx context.Context, logger *slog.Logger,
 
 	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
 	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugCtx(ctx, "get-item response", slog.Any("input", input), slog.Any("output", resp))
+	logger.DebugContext(ctx, "get-item response", slog.Any("input", input), slog.Any("output", resp))
 	return resp, err
 }
 
@@ -111,7 +112,7 @@ func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context, logger *slog.Logg
 
 	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
 	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugCtx(ctx, "batch-write-item response", slog.Any("input", input), slog.Any("output", resp))
+	logger.DebugContext(ctx, "batch-write-item response", slog.Any("input", input), slog.Any("output", resp))
 	return resp, err
 }
 

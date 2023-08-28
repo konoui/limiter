@@ -1,6 +1,6 @@
 module github.com/konoui/limiter
 
-go 1.20
+go 1.21
 
 require (
 	github.com/aws/aws-lambda-go v1.41.0
@@ -17,7 +17,6 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/hashicorp/golang-lru/v2 v2.0.2
 	github.com/spf13/cobra v1.7.0
-	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
 )
 
 require (

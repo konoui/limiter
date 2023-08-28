@@ -1,0 +1,11 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "rate-limiter"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1kken57dkt8mt"
+s3_prefix = "rate-limiter"
+region = "ap-northeast-1"
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+image_repositories = ["Function=537374516367.dkr.ecr.ap-northeast-1.amazonaws.com/ratelimiter9341c826/function86408593repo"]

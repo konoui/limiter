@@ -5,17 +5,18 @@ import (
 	"fmt"
 	"os"
 
+	"log/slog"
+
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/google/uuid"
 	"github.com/konoui/limiter"
 	"github.com/spf13/cobra"
-	"golang.org/x/exp/slog"
 )
 
 const (
 	// https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html
-	envRunOnLambda    = "AWS_LAMBDA_FUNCTION_NAME"
+	envRunOnLambda    = "AWS_LAMBDA_FUNCTION_NAME" //nolint
 	envConfigFilepath = "LIMITER_CONFIG_FILEPATH"
 )
 
