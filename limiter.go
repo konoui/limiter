@@ -249,7 +249,6 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 					return 0, errors.Join(err, ErrInternal)
 				}
 				// subtractToken successfully
-				logger.DebugContext(ctx, "subtract-token succeeded")
 				return 1, err
 			}
 			// an internal error at refillToken
@@ -257,7 +256,6 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 			return 0, errors.Join(err, ErrInternal)
 		}
 		// available token are current token count + refill token count
-		logger.DebugContext(ctx, "refill-token succeeded")
 		return token + refillTokenCount, nil
 	case token > 0:
 		err := l.subtractToken(ctx, logger, bucketID, shardID, now)
