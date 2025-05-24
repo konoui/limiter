@@ -206,7 +206,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			err:      nil,
 		},
 		{
-			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns zero token",
+			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns zero token",
 			mocker: func(client *mock.MockDDBClient) {
 				item := &ddbItem{
 					TokenCount:  1,

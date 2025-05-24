@@ -10,6 +10,9 @@ import (
 )
 
 type key struct{}
+
+type KeyGetter interface {
+}
 type GetKey = func(*http.Request) (string, error)
 
 var (
