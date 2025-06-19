@@ -590,6 +590,8 @@ func CreateTable(ctx context.Context, tableName string, client *dynamodb.Client)
 	var ie *types.ResourceInUseException
 	if errors.As(err, &ae) || errors.As(err, &ie) {
 		return nil
+	} else if err != nil {
+		return err
 	}
 
 	waiter := dynamodb.NewTableExistsWaiter(client)
