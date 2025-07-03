@@ -31,7 +31,7 @@ func newTokenBucket(rateLimit, bucketSize int64, interval time.Duration) (*Token
 		return nil, errInvalidRateLimitArg
 	}
 
-	if rateLimit*2 > bucketSize {
+	if rateLimit > bucketSize {
 		return nil, errInvalidRateLimitBucketSize
 	}
 
