@@ -24,8 +24,8 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, ok := handlerfunc.FromContext(r.Context())
 		if !ok {
+			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintf(w, "unexpected error")
-			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
@@ -62,12 +62,21 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 	mux.Handle("/anon",
 		MiddlewareLimiter(
 			arl,
-			func(r *http.Request) (string, error) {
-				ip, _, err := net.SplitHostPort(r.RemoteAddr)
-				return ip, err
-			},
+			remoteIP,
 			h))
 	return mux, nil
+}
+
+// remoteIP returns the client IP address.
+// RemoteAddr is "host:port" on net/http server but only "host" on Lambda (aws-lambda-go-api-proxy).
+func remoteIP(r *http.Request) (string, error) {
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip, nil
+	}
+	if ip := net.ParseIP(r.RemoteAddr); ip != nil {
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("invalid remote address: %q", r.RemoteAddr)
 }
 
 func StartServer(addr string, handler http.Handler) error {

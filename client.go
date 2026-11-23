@@ -3,7 +3,6 @@ package limiter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 
@@ -36,10 +35,10 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
 	params ...func(*dynamodb.Options)) (_ *dynamodb.UpdateItemOutput, err error) {
 	defer func() {
 		if isErrLimitExceeded(err) {
-			err = errors.Join(err, ErrRateLimitExceeded)
+			err = fmt.Errorf("%w: %w", ErrRateLimitExceeded, err)
 			bid, sid, lerr := getKeys(input.Key)
 			if lerr != nil {
-				err = errors.Join(err, lerr)
+				// failing to build metrics must not change the API error
 				return
 			}
 			outputLog(c.metricOut, buildDDBThrottleMetric(*input.TableName, "UpdateItem", bid, sid))
@@ -53,7 +52,7 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
 
 	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
 	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugContext(ctx, "update-item response", slog.Any("input", input), slog.Any("output", resp))
+	logger.DebugContext(ctx, "update-item response", slog.Any("consumed_capacity", resp.ConsumedCapacity))
 	return resp, err
 }
 
@@ -62,10 +61,10 @@ func (c *wrappedDDBClient) GetItem(ctx context.Context, logger *slog.Logger,
 	params ...func(*dynamodb.Options)) (out *dynamodb.GetItemOutput, err error) {
 	defer func() {
 		if isErrLimitExceeded(err) {
-			err = errors.Join(err, ErrRateLimitExceeded)
+			err = fmt.Errorf("%w: %w", ErrRateLimitExceeded, err)
 			bid, sid, lerr := getKeys(input.Key)
 			if lerr != nil {
-				err = errors.Join(err, lerr)
+				// failing to build metrics must not change the API error
 				return
 			}
 			outputLog(c.metricOut, buildDDBThrottleMetric(*input.TableName, "GetItem", bid, sid))
@@ -79,7 +78,7 @@ func (c *wrappedDDBClient) GetItem(ctx context.Context, logger *slog.Logger,
 
 	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
 	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugContext(ctx, "get-item response", slog.Any("input", input), slog.Any("output", resp))
+	logger.DebugContext(ctx, "get-item response", slog.Any("consumed_capacity", resp.ConsumedCapacity))
 	return resp, err
 }
 
@@ -88,16 +87,17 @@ func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context, logger *slog.Logg
 	params ...func(*dynamodb.Options)) (out *dynamodb.BatchWriteItemOutput, err error) {
 	defer func() {
 		if isErrLimitExceeded(err) {
-			err = errors.Join(err, ErrRateLimitExceeded)
-			for tableName, v := range out.UnprocessedItems {
+			err = fmt.Errorf("%w: %w", ErrRateLimitExceeded, err)
+			// out is nil when an error is returned. the whole input was throttled.
+			for tableName, v := range input.RequestItems {
 				for _, attr := range v {
 					if attr.PutRequest == nil || attr.PutRequest.Item == nil {
-						return
+						continue
 					}
 					bid, sid, lerr := getKeys(attr.PutRequest.Item)
 					if lerr != nil {
-						err = errors.Join(err, lerr)
-						return
+						// failing to build metrics must not change the API error
+						continue
 					}
 					outputLog(c.metricOut, buildDDBThrottleMetric(tableName, "BatchWriteItem", bid, sid))
 				}
@@ -112,7 +112,7 @@ func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context, logger *slog.Logg
 
 	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
 	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugContext(ctx, "batch-write-item response", slog.Any("input", input), slog.Any("output", resp))
+	logger.DebugContext(ctx, "batch-write-item response", slog.Any("consumed_capacity", resp.ConsumedCapacity))
 	return resp, err
 }
 
@@ -122,7 +122,8 @@ func getKeys(attr map[string]types.AttributeValue) (bucketID string, shardID str
 	if err != nil {
 		return "", "", fmt.Errorf("handle input: %w", err)
 	}
-	return splitPartitionKey(item.BucketIDShardID)
+	bid, sid, err := splitPartitionKey(item.BucketIDShardID)
+	return redactID(bid), sid, err
 }
 
 type EMF struct {
@@ -154,7 +155,7 @@ type Metric struct {
 var (
 	throttleMetrics = CloudWatchMetrics{
 		Namespace:  "RateLimit",
-		Dimensions: [][]string{{"TableName", "BucketID", "ShardID"}},
+		Dimensions: [][]string{{"TableName", "ShardID"}},
 		Metrics: []Metric{
 			{
 				Name: "Throttle",
@@ -164,7 +165,7 @@ var (
 	}
 	ddbThrottleMetrics = CloudWatchMetrics{
 		Namespace:  "RateLimit",
-		Dimensions: [][]string{{"TableName", "BucketID", "ShardID", "Operation"}},
+		Dimensions: [][]string{{"TableName", "ShardID", "Operation"}},
 		Metrics: []Metric{
 			{
 				Name: "Throttle",
@@ -219,5 +220,6 @@ func outputLog(w io.Writer, emf *EMF) {
 	if err != nil {
 		return
 	}
-	_, _ = w.Write(d)
+	// EMF requires one JSON object per line
+	_, _ = w.Write(append(d, '\n'))
 }

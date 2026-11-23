@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -20,7 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
-	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
@@ -56,7 +54,7 @@ type RateLimit struct {
 	tableName  string
 	anonymous  bool
 	ttl        time.Duration
-	ncache     *lru.Cache[string, interface{}]
+	ncache     *negativeCache
 	maxLength  int
 	baseLogger *slog.Logger
 }
@@ -69,6 +67,17 @@ type ddbItem struct {
 	TTL         int64 `dynamodbav:"ttl" json:"ttl"`
 	shardID     int64
 	bucketID    string
+}
+
+// LogValue implements slog.LogValuer to keep the raw bucket id out of logs.
+func (i *ddbItem) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("bucket_id", redactID(i.bucketID)),
+		slog.Int64("shard_id", i.shardID),
+		slog.Int64("token_count", i.TokenCount),
+		slog.Int64("last_updated", i.LastUpdated),
+		slog.Int64("ttl", i.TTL),
+	)
 }
 
 type Opt func(rl *RateLimit)
@@ -92,9 +101,9 @@ func withAnonymous(ttl time.Duration) Opt {
 	}
 }
 
-func withNegativeCache(size int) Opt {
+func withNegativeCache(size int, ttl time.Duration) Opt {
 	return func(rl *RateLimit) {
-		rl.ncache.Resize(size)
+		rl.ncache = newNegativeCache(size, ttl)
 	}
 }
 
@@ -111,7 +120,7 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 		return nil, err
 	}
 	if cfg.TableName == "" {
-		return nil, errors.New("table_name in config is empty")
+		return nil, errors.New("table_name must not be empty")
 	}
 
 	addOpts, err := cfgToOpts(cfg.AdditionalConfig)
@@ -129,7 +138,7 @@ func newLimiter(table string, bucket *TokenBucket, client DDBClient, opts ...Opt
 		bucket:    bucket,
 		tableName: table,
 		client:    newWrapDDBClient(client, io.Discard),
-		ncache:    defaultCache,
+		ncache:    newNegativeCache(defaultNegativeCacheSize, defaultNegativeCacheTTL),
 		maxLength: 512, // a WCU is 1kib basis
 		// disabled by default
 		baseLogger: slog.New(slog.NewJSONHandler(io.Discard, &slog.HandlerOptions{Level: slog.Level(-1)})),
@@ -169,7 +178,7 @@ func (l *RateLimit) ShouldThrottle(ctx context.Context, bucketID string) (bool, 
 func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID int64) (throttled bool, err error) {
 	logger := l.baseLogger.With(
 		slog.String("table_name", l.tableName),
-		slog.String("bucket_id", bucketID),
+		slog.String("bucket_id", redactID(bucketID)),
 		slog.Int64("shard_id", shardID),
 		slog.Int("negative_cache_entries", l.ncache.Len()),
 	)
@@ -179,7 +188,7 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 		return true, fmt.Errorf("exceeded maximum bucket id length %d: %w", l.maxLength, ErrInvalidBucketID)
 	}
 
-	if bucketID != "" && l.ncache.Contains(bucketID) {
+	if l.ncache.Contains(bucketID) {
 		return true, fmt.Errorf("found in negative cache: %w", ErrInvalidBucketID)
 	}
 
@@ -188,20 +197,21 @@ func (l *RateLimit) shouldThrottle(ctx context.Context, bucketID string, shardID
 	defer func() {
 		if err != nil {
 			// add context to an error
-			err = fmt.Errorf("bucketID %s, shardID %d: %w", bucketID, shardID, err)
+			// never put the raw bucket id into errors. it may be a secret such as an API key.
+			err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
 		}
 	}()
 
 	// add negative cache and early return
 	if errors.Is(err, ErrInvalidBucketID) {
 		logger.DebugContext(ctx, "adding into the negative cache")
-		l.ncache.Add(bucketID, nil)
+		l.ncache.Add(bucketID)
 		return true, err
 	}
 
 	// other throttle will be caught here to record metrics
 	if throttle {
-		outputLog(l.client.metricOut, buildThrottleMetric(l.tableName, bucketID, int64String(shardID)))
+		outputLog(l.client.metricOut, buildThrottleMetric(l.tableName, redactID(bucketID), int64String(shardID)))
 	}
 
 	// ignore ConditionalCheckFailed
@@ -229,14 +239,14 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 
 	now := timeNow().UnixMilli()
 	token := item.TokenCount
-	refillTokenCount := l.calculateRefillToken(item, now)
+	refillTokenCount, newLastUpdated := l.calculateRefillToken(item, now)
 	logger.DebugContext(ctx, "tokens",
 		slog.Int64("current", token),
 		slog.Int64("refilled", refillTokenCount))
 	switch {
 	case refillTokenCount > 0:
 		// store subtracted token as a token will be used for get-token
-		err := l.refillToken(ctx, logger, bucketID, shardID, refillTokenCount-1, item.LastUpdated, now)
+		err := l.refillToken(ctx, logger, bucketID, shardID, refillTokenCount-1, item.LastUpdated, newLastUpdated, now)
 		if err != nil {
 			if isErrConditionalCheckFailed(err) {
 				// fallback to subtract, when succeeded, available one token at least.
@@ -250,7 +260,7 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 					// an internal error at subtractToken
 					logger.ErrorContext(ctx, "subtract-token failed", slog.String("error",
 						err.Error()))
-					return 0, errors.Join(err, ErrInternal)
+					return 0, fmt.Errorf("%w: %w", ErrInternal, err)
 				}
 				// subtractToken successfully
 				return 1, err
@@ -258,7 +268,7 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 			// an internal error at refillToken
 			logger.ErrorContext(ctx, "refill-token failed",
 				slog.String("error", err.Error()))
-			return 0, errors.Join(err, ErrInternal)
+			return 0, fmt.Errorf("%w: %w", ErrInternal, err)
 		}
 		// available token are current token count + refill token count
 		return token + refillTokenCount, nil
@@ -273,7 +283,7 @@ func (l *RateLimit) getToken(ctx context.Context, logger *slog.Logger, bucketID 
 			// an internal error at subtractToken
 			logger.ErrorContext(ctx, "subtract-token failed",
 				slog.String("error", err.Error()))
-			return 0, errors.Join(err, ErrInternal)
+			return 0, fmt.Errorf("%w: %w", ErrInternal, err)
 		}
 		logger.DebugContext(ctx, "subtract-token succeeded")
 		return 1, nil
@@ -315,8 +325,20 @@ func (l *RateLimit) getTokenItem(ctx context.Context, logger *slog.Logger, bucke
 			return i, nil
 		}
 
-		logger.DebugContext(ctx, "unregistered bucket id")
-		return nil, fmt.Errorf("unregistered bucket id: %w", ErrInvalidBucketID)
+		// GetItem is eventually consistent by default. A token just created by PrepareTokens
+		// may not be visible yet. Confirm with a strongly consistent read before treating it as invalid,
+		// otherwise a valid bucket id would be stored into the negative cache.
+		input.ConsistentRead = aws.Bool(true)
+		resp, err = l.client.GetItem(ctx, logger, input)
+		if err != nil {
+			logger.ErrorContext(ctx, "get-token-item with consistent read failed",
+				slog.String("error", err.Error()))
+			return nil, fmt.Errorf("get-token-item: %w", err)
+		}
+		if len(resp.Item) == 0 {
+			logger.DebugContext(ctx, "unregistered bucket id")
+			return nil, fmt.Errorf("unregistered bucket id: %w", ErrInvalidBucketID)
+		}
 	}
 
 	item := new(ddbItem)
@@ -332,26 +354,36 @@ func (l *RateLimit) getTokenItem(ctx context.Context, logger *slog.Logger, bucke
 	return item, nil
 }
 
-func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) int64 {
-	num := math.Floor(float64((now - item.LastUpdated)) / float64(l.bucket.interval.Milliseconds()))
-	if num < 0 {
-		return 0
+// calculateRefillToken returns the number of tokens to refill and the next last_updated value.
+// The next last_updated advances by whole intervals only, so that the elapsed remainder
+// is carried over to the next refill instead of being discarded.
+func (l *RateLimit) calculateRefillToken(item *ddbItem, now int64) (refill, newLastUpdated int64) {
+	intervalMilli := l.bucket.interval.Milliseconds()
+	elapsed := now - item.LastUpdated
+	if elapsed < intervalMilli {
+		return 0, item.LastUpdated
 	}
-	refill := l.bucket.tokensPerShardPerInterval[item.shardID] * int64(num)
+	num := elapsed / intervalMilli
+	newLastUpdated = item.LastUpdated + num*intervalMilli
+
+	refill = l.bucket.tokensPerShardPerInterval[item.shardID] * num
 	burstable := l.bucket.bucketSizePerShard[item.shardID] - item.TokenCount
-	if refill > burstable {
-		return burstable
+	if burstable < 0 {
+		burstable = 0
 	}
-	return refill
+	if refill > burstable {
+		refill = burstable
+	}
+	return refill, newLastUpdated
 }
 
 // refillToken if return an error of ConditionalCheckFailedException, this means other request has been accepted before this request
 func (l *RateLimit) refillToken(ctx context.Context, logger *slog.Logger,
-	bucketID string, shardID, refillTokenCount, lastUpdated, now int64) error {
+	bucketID string, shardID, refillTokenCount, lastUpdated, newLastUpdated, now int64) error {
 	logger = logger.WithGroup("refill_token")
 
 	shardBurstSize := l.bucket.bucketSizePerShard[shardID]
-	condNotExist := expression.Name("bucket_id").AttributeNotExists()
+	condNotExist := expression.Name(attrBucketIDShardID).AttributeNotExists()
 	// Check last_updated is equal to last_updated of got item to achieve strong write consistency.
 	// Other refillToken request is accepted before this, it will cause ConditionalCheckFailedException.
 	// It avoid to refill tokens unexpectedly.
@@ -366,7 +398,7 @@ func (l *RateLimit) refillToken(ctx context.Context, logger *slog.Logger,
 	condExpr := condNotExist.Or(expression.ConditionBuilder(condUpdated))
 	updateExpr := expression.
 		Set(
-			expression.Name("last_updated"), expression.Value(now)).
+			expression.Name("last_updated"), expression.Value(newLastUpdated)).
 		Add(
 			expression.Name("token_count"), expression.Value(refillTokenCount),
 		)
@@ -406,14 +438,13 @@ func (l *RateLimit) subtractToken(ctx context.Context, logger *slog.Logger, buck
 	// No handling the error here
 	// "token_count > :min_val"
 	condExpr := expression.Name("token_count").GreaterThan(expression.Value(0))
-	// "SET last_updated = :now ADD token_count :mod"
-	updateExpr := expression.Set(
-		expression.Name("last_updated"),
-		expression.Value(now)).
-		Add(
-			expression.Name("token_count"),
-			expression.Value(-1),
-		)
+	// "ADD token_count :mod"
+	// last_updated must not be updated here. It is the base time of refilling.
+	// Updating it on every consumption delays refilling under steady traffic.
+	updateExpr := expression.Add(
+		expression.Name("token_count"),
+		expression.Value(-1),
+	)
 	updateExpr = l.updateTTLExpr(updateExpr, now)
 
 	expr, err := expression.NewBuilder().WithCondition(condExpr).WithUpdate(updateExpr).Build()
@@ -457,7 +488,7 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) (err err
 	now := timeNow().UnixMilli()
 	batchSize := 25
 
-	logger := l.baseLogger.With(slog.String("bucket_id", bucketID))
+	logger := l.baseLogger.With(slog.String("bucket_id", redactID(bucketID)))
 	logger.DebugContext(ctx, "distribute shards", slog.Int("length", len(shards)))
 	for i := 0; i < len(shards); i += batchSize {
 		if len(shards) < batchSize+i {

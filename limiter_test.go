@@ -26,6 +26,9 @@ import (
 
 var logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 
+// UPDATE_GOLDEN=1 go test ./... regenerates golden files under testdata
+var updateGolden = os.Getenv("UPDATE_GOLDEN") != ""
+
 func testClient(t *testing.T) *dynamodb.Client {
 	t.Helper()
 	t.Setenv("AWS_ACCESS_KEY_ID", "123456")
@@ -133,8 +136,9 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			mocker: func(client *mock.MockDDBClient) {
 				client.EXPECT().
 					GetItem(gomock.Any(), gomock.Any()).
-					// empty item
-					Return(&dynamodb.GetItemOutput{Item: map[string]types.AttributeValue{}}, nil)
+					// empty item for both eventual and consistent reads
+					Return(&dynamodb.GetItemOutput{Item: map[string]types.AttributeValue{}}, nil).
+					Times(2)
 			},
 			throttle:   true,
 			metricFile: "empty-result.json",
@@ -313,7 +317,7 @@ func TestRateLimit_ShouldThrottleMock(t *testing.T) {
 			// golden test
 			if tt.throttle || errors.Is(err, ErrRateLimitExceeded) {
 				gotJSON := out.String()
-				if tt.update {
+				if tt.update || updateGolden {
 					writeTestFile(t, gotJSON, tt.metricFile)
 				}
 				wantJSON := readTestFile(t, tt.metricFile)
@@ -341,9 +345,11 @@ func TestRateLimit_ShouldThrottleWithNegativeCache(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 	client := mock.NewMockDDBClient(ctrl)
+	// eventual read and consistent read, then the second call is served by the negative cache
 	client.EXPECT().
 		GetItem(gomock.Any(), gomock.Any()).
-		Return(&dynamodb.GetItemOutput{}, nil)
+		Return(&dynamodb.GetItemOutput{}, nil).
+		Times(2)
 
 	l, err := New(&cfg, client)
 	if err != nil {
@@ -488,6 +494,8 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 		base     int64
 		wait     time.Duration
 		cur      int64
+		// wantCarry is the elapsed time that is not consumed by refilling
+		wantCarry time.Duration
 	}{
 		{
 			name:     "not wait",
@@ -504,18 +512,29 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 			wait:     2 * time.Second,
 		},
 		{
-			name:     "waiting an interval and half add one base",
-			interval: 2 * time.Second,
-			base:     10,
-			want:     10,
-			wait:     3 * time.Second,
+			name:      "waiting an interval and half add one base and carry over the half",
+			interval:  2 * time.Second,
+			base:      10,
+			want:      10,
+			wait:      3 * time.Second,
+			wantCarry: 1 * time.Second,
 		},
 		{
 			name:     "waiting some intervals add to bucket size",
 			interval: 2 * time.Second,
 			base:     10,
 			want:     20,
-			wait:     40 * time.Second,
+			wait:     41 * time.Second,
+			// remainder is less than an interval
+			wantCarry: 1 * time.Second,
+		},
+		{
+			name:     "full bucket refills nothing",
+			interval: 2 * time.Second,
+			base:     10,
+			cur:      20,
+			want:     0,
+			wait:     4 * time.Second,
 		},
 		{
 			name:     "current 1 and waiting interval add one base",
@@ -546,7 +565,7 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 				bucket:    bucket,
 				tableName: "dummy",
 			}
-			got := l.calculateRefillToken(&ddbItem{
+			got, gotLastUpdated := l.calculateRefillToken(&ddbItem{
 				LastUpdated: now.Add(-tt.wait).UnixMilli(),
 				TokenCount:  tt.cur,
 				shardID:     0,
@@ -554,6 +573,9 @@ func TestRateLimit_calculateRefillToken(t *testing.T) {
 
 			if got != tt.want {
 				t.Errorf("RateLimit.calculateRefillToken() = %v, want %v", got, tt.want)
+			}
+			if want := now.Add(-tt.wantCarry).UnixMilli(); gotLastUpdated != want {
+				t.Errorf("RateLimit.calculateRefillToken() last_updated = %v, want %v", gotLastUpdated, want)
 			}
 		})
 	}

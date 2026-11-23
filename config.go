@@ -22,16 +22,18 @@ type AdditionalConfig struct {
 	Anonymous     *AnonymousConfig     `json:"anonymous,omitempty"`
 }
 
-// WithNegativeCache configures negative cache entry size for invalid bucket ids.
-// specifying 0 means to disable cache
+// NegativeCacheConfig configures negative cache for invalid bucket ids.
+// Size is the maximum number of entries. specifying 0 means to disable cache.
+// TTL is how long an entry is kept. 5 minutes by default.
 type NegativeCacheConfig struct {
-	Size int `json:"size"`
+	Size int           `json:"size"`
+	TTL  time.Duration `json:"ttl,omitempty"`
 }
 
 // AnonymousConfig allows not registered bucket id.
 // This is used for such as an IP address basis throttling.
 type AnonymousConfig struct {
-	RecordTTL time.Duration `json:"record_ttl,"`
+	RecordTTL time.Duration `json:"record_ttl"`
 }
 
 func cfgToOpts(cfg *AdditionalConfig) ([]Opt, error) {
@@ -55,7 +57,14 @@ func cfgToOpts(cfg *AdditionalConfig) ([]Opt, error) {
 		if size < 0 {
 			return nil, errors.New("negative_cache.size is specified but value is less than zero")
 		}
-		opts = append(opts, withNegativeCache(size))
+		ttl := cfg.NegativeCache.TTL
+		if ttl < 0 {
+			return nil, errors.New("negative_cache.ttl is specified but value is less than zero")
+		}
+		if ttl == 0 {
+			ttl = defaultNegativeCacheTTL
+		}
+		opts = append(opts, withNegativeCache(size, ttl))
 	}
 	return opts, nil
 }
@@ -66,14 +75,31 @@ func NewConfig(r io.Reader) (*Config, error) {
 
 func newConfig(ro io.Reader) (*Config, error) {
 	cfg := new(Config)
-	err := yaml.NewDecoder(ro).Decode(cfg)
+	// reject unknown keys so that a typo is reported instead of silently becoming a zero value
+	err := yaml.NewDecoder(ro, yaml.DisallowUnknownField()).Decode(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	_, err = cfgToOpts(cfg.AdditionalConfig)
-	if err != nil {
-		return nil, err
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return cfg, nil
+}
+
+func (cfg *Config) validate() error {
+	if cfg.TableName == "" {
+		return errors.New("table_name must not be empty")
+	}
+	interval := cfg.Interval
+	if interval == 0 {
+		interval = DefaultInterval
+	}
+	if _, err := newTokenBucket(cfg.TokenPerInterval, cfg.BucketSize, interval); err != nil {
+		return err
+	}
+	if _, err := cfgToOpts(cfg.AdditionalConfig); err != nil {
+		return err
+	}
+	return nil
 }

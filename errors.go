@@ -1,6 +1,8 @@
 package limiter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -9,13 +11,20 @@ import (
 )
 
 var (
-	errInvalidRateLimitArg        = errors.New("rate_limit must be greater than zero")
-	errInvalidRateLimitBucketSize = errors.New("bucket_size must be larger than or equal rate_limit")
+	errInvalidRateLimitArg        = errors.New("token_per_interval must be greater than zero")
+	errInvalidRateLimitBucketSize = errors.New("bucket_size must be larger than or equal to token_per_interval")
 	errInvalidInterval            = errors.New("interval must be greater than or equal 1 sec")
 	ErrRateLimitExceeded          = errors.New("API rate limit exceeded")
 	ErrInternal                   = errors.New("internal API error")
 	ErrInvalidBucketID            = errors.New("invalid bucket id")
 )
+
+// redactID returns a short, stable and non-reversible identifier for a bucket id.
+// Bucket ids may be secrets such as API keys, so they must not appear in errors, logs or metrics as is.
+func redactID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "sha256:" + hex.EncodeToString(sum[:6])
+}
 
 func isErrConditionalCheckFailed(err error) bool {
 	var e *types.ConditionalCheckFailedException

@@ -210,7 +210,7 @@ func newLimiters(filepath string, client *dynamodb.Client) (map[string]*limiter.
 	for key, v := range cfg {
 		rl, err := limiter.New(v, client, limiter.WithLogger(logger.WithGroup(key+"_limiter")))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("config %q in %s: %w", key, filepath, err)
 		}
 		ret[key] = rl
 	}
