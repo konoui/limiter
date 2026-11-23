@@ -1,18 +1,26 @@
+version: "2"
 linters:
-  enable-all: false
+  default: none
   enable:
-    # Enabled By Default Linters
     - govet
     - errcheck
-    - staticcheck
+    - staticcheck # includes gosimple and stylecheck
     - unused
-    - gosimple
     - ineffassign
-    - typecheck
-    # add
     - misspell
     - revive
-    - stylecheck
     - gosec
     - gocritic
-  disable-all: true
+  exclusions:
+    # same as the defaults of golangci-lint v1
+    presets:
+      - comments
+      - std-error-handling
+    paths:
+      - mock_limiter
+      - mock_ddb_client_test.go
+    rules:
+      - path: _test\.go
+        linters:
+          - revive
+        text: unused-parameter

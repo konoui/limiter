@@ -1,43 +1,68 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
+Description: Example API rate limited with DynamoDB (GCRA)
+
+Parameters:
+  TableName:
+    Type: String
+    # must match table_name in cmd/example-config.yaml, which is baked into the image
+    Default: test_table
+
 Globals:
   Function:
     Timeout: 5
 
 Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: bucket_id_shard_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: bucket_id_shard_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   Function:
     Type: AWS::Serverless::Function
     Properties:
       PackageType: Image
       Architectures:
-      - arm64
+        - arm64
       Events:
-        hello:
-          Type: HttpApi
-          Properties:
-            Path: /hello
-            Method: GET
         create:
           Type: HttpApi
           Properties:
             Path: /create
             Method: POST
-      Environment:
-        Variables:
-          TABLE_NAME: test-rate-limit
-          RATE_LIMIT: 20
-          BUCKET_SIZE: 40
-          INTERVAL: 60
+        anon:
+          Type: HttpApi
+          Properties:
+            Path: /anon
+            Method: GET
+        hello:
+          Type: HttpApi
+          Properties:
+            Path: /hello
+            Method: GET
       Policies:
-      - Statement:
-        - Sid: DynamoDBAccess
-          Effect: Allow
-          Action:
-          - dynamodb:BatchWriteItem
-          - dynamodb:GetItem
-          - dynamodb:UpdateItem
-          Resource: '*'
+        - Statement:
+            - Sid: DynamoDBAccess
+              Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:BatchWriteItem
+              Resource: !GetAtt Table.Arn
     Metadata:
-      DockerTag: go1.x-v1
+      DockerTag: go1.26-v2
       DockerContext: ./
       Dockerfile: Dockerfile
+
+Outputs:
+  Endpoint:
+    Value: !Sub https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com

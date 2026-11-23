@@ -2,21 +2,31 @@ name: test
 
 on:
   push:
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - name: checkout
-      uses: actions/checkout@v3
-    - name: set up go
-      uses: actions/setup-go@v3
-      with:
-        go-version-file: "go.mod"
-    - name: lint
-      run: |
-        make lint
-    - name: test
-      run: |
-        make start-local
-        make test
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: set up go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+      - name: check generated mocks
+        run: |
+          make generate
+          git diff --exit-code
+      - name: test
+        # DynamoDB Local tests fail instead of skipping when CI is set (GitHub Actions sets it)
+        run: |
+          make start-local
+          make test

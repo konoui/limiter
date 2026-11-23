@@ -1,11 +1,12 @@
-FROM --platform=arm64 public.ecr.aws/docker/library/golang:latest as build
-ENV GOPROXY=direct
-WORKDIR /usr/src/app
+FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/golang:1.26 AS build
+WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod tidy && go mod  download
+RUN go mod download
 COPY . .
-RUN make build
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o /out/bootstrap ./cmd
 
-FROM --platform=arm64 public.ecr.aws/lambda/provided:al2
-COPY --from=build /usr/src/app/bin/main ${LAMBDA_RUNTIME_DIR}/bootstrap
-CMD [ "main"]
+FROM --platform=linux/arm64 public.ecr.aws/lambda/provided:al2023
+COPY --from=build /out/bootstrap ${LAMBDA_RUNTIME_DIR}/bootstrap
+COPY cmd/example-config.yaml /etc/limiter/config.yaml
+ENV LIMITER_CONFIG_FILEPATH=/etc/limiter/config.yaml
+CMD ["bootstrap"]
