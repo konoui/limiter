@@ -72,6 +72,9 @@ type RateLimit struct {
 	// ncache remembers unregistered bucket ids
 	ncache    *expiringCache
 	ncacheTTL time.Duration
+	// rcache remembers registered bucket ids
+	rcache    *expiringCache
+	rcacheTTL time.Duration
 	// dcache remembers denied shards until they are allowed again, to skip DynamoDB calls
 	dcache    *expiringCache
 	maxLength int
@@ -129,7 +132,7 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 	if interval == 0 {
 		interval = DefaultInterval
 	}
-	g, err := newGCRA(cfg.TokenPerInterval, cfg.BucketSize, interval)
+	g, err := newGCRA(cfg.TokenPerInterval, cfg.BucketSize, interval, cfg.Shards)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +147,8 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 		tableName: cfg.TableName,
 		ncache:    newExpiringCache(defaultNegativeCacheSize),
 		ncacheTTL: defaultNegativeCacheTTL,
+		rcache:    newExpiringCache(defaultRegistrationCacheSize),
+		rcacheTTL: defaultRegistrationCacheTTL,
 		dcache:    newExpiringCache(defaultDenyCacheSize),
 		maxLength: 512, // a WCU is 1KiB basis
 		logger:    slog.New(slog.DiscardHandler),
@@ -177,15 +182,21 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		l.metrics.recordDecision(ctx, resultInvalid, sourceCache)
 		return Decision{}, fmt.Errorf("bucket id is longer than %d: %w", l.maxLength, ErrInvalidBucketID)
 	}
-	if l.ncache.Contains(bucketID) {
-		l.metrics.recordDecision(ctx, resultInvalid, sourceCache)
-		return Decision{}, fmt.Errorf("bucket %s: unregistered bucket id (cached): %w", redactID(bucketID), ErrInvalidBucketID)
-	}
 
 	baseLogger := l.logger.With(
 		slog.String("table_name", l.tableName),
 		slog.String("bucket_id", redactID(bucketID)),
 	)
+	if source, err := l.checkRegistered(ctx, baseLogger, bucketID); err != nil {
+		err = fmt.Errorf("bucket %s: %w", redactID(bucketID), err)
+		if errors.Is(err, ErrInvalidBucketID) {
+			l.metrics.recordDecision(ctx, resultInvalid, source)
+			return Decision{}, err
+		}
+		baseLogger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
+		l.metrics.recordDecision(ctx, resultError, source)
+		return Decision{Allowed: l.failOpen}, err
+	}
 	now := timeNow()
 	tries := 0
 	var denied Decision // the earliest retry among denied shards
@@ -205,11 +216,6 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		d, err := l.allow(ctx, logger, bucketID, shardID, now.UnixNano())
 		if err != nil {
 			err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
-			if errors.Is(err, ErrInvalidBucketID) {
-				l.ncache.AddUntil(bucketID, now.Add(l.ncacheTTL))
-				l.metrics.recordDecision(ctx, resultInvalid, sourceDynamoDB)
-				return Decision{}, err
-			}
 			logger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
 			l.metrics.recordDecision(ctx, resultError, sourceDynamoDB)
 			return Decision{Allowed: l.failOpen}, err
@@ -277,10 +283,7 @@ func (l *RateLimit) allow(ctx context.Context, logger *slog.Logger, bucketID str
 		}
 
 		if len(ccf.Item) == 0 {
-			if !l.anonymous {
-				return Decision{}, fmt.Errorf("unregistered bucket id: %w", ErrInvalidBucketID)
-			}
-			// deleted concurrently (e.g. by TTL). create it again.
+			// not created yet, or deleted concurrently (e.g. by TTL). create it.
 			path = pathIdle
 			continue
 		}
@@ -305,18 +308,16 @@ func (l *RateLimit) allow(ctx context.Context, logger *slog.Logger, bucketID str
 	return Decision{Allowed: false, RetryAfter: s.emission}, nil
 }
 
-// writeIdle sets TAT = now + emission when TAT < now (or the item has no TAT yet).
+// writeIdle sets TAT = now + emission when TAT < now, creating the shard item if needed.
+// Registration is checked separately by checkRegistered.
 func (l *RateLimit) writeIdle(ctx context.Context, logger *slog.Logger, bucketID string, shardID int, now int64, s shardParams) (int64, error) {
 	tat := now + int64(s.emission)
-	noTAT := expression.Name(attrTAT).AttributeNotExists()
-	before := expression.Name(attrTAT).LessThan(expression.Value(now))
-	var cond expression.ConditionBuilder
-	if l.anonymous {
-		cond = expression.Or(expression.Name(attrBucketIDShardID).AttributeNotExists(), noTAT, before)
-	} else {
-		// registered bucket ids only. items written by an older version have no TAT.
-		cond = expression.And(expression.Name(attrBucketIDShardID).AttributeExists(), expression.Or(noTAT, before))
-	}
+	cond := expression.Or(
+		expression.Name(attrBucketIDShardID).AttributeNotExists(),
+		// items written by the token bucket version have no TAT
+		expression.Name(attrTAT).AttributeNotExists(),
+		expression.Name(attrTAT).LessThan(expression.Value(now)),
+	)
 	update := l.withTTL(expression.Set(expression.Name(attrTAT), expression.Value(tat)), now)
 	if _, err := l.update(ctx, logger, bucketID, shardID, cond, update, types.ReturnValueNone); err != nil {
 		return 0, err
@@ -375,8 +376,10 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 		return fmt.Errorf("prepare-tokens: bucket id must be 1 to %d bytes: %w", l.maxLength, ErrInvalidBucketID)
 	}
 	logger := l.logger.With(slog.String("bucket_id", redactID(bucketID)))
+	now := timeNow()
 
-	requests := make([]types.WriteRequest, 0, len(l.gcra.shards))
+	// shard items are reset here, but they are also created on demand
+	requests := make([]types.WriteRequest, 0, len(l.gcra.shards)+1)
 	for shardID := range l.gcra.shards {
 		attrs, err := attributevalue.MarshalMap(&ddbItem{
 			BucketIDShardID: makePartitionKey(bucketID, shardID),
@@ -388,17 +391,22 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 		}
 		requests = append(requests, types.WriteRequest{PutRequest: &types.PutRequest{Item: attrs}})
 	}
+	// the registration item is written last, so that a registered id always has reset shards
+	reg, err := registrationRequest(bucketID, now)
+	if err != nil {
+		return fmt.Errorf("prepare-tokens: %w", err)
+	}
+	requests = append(requests, reg)
 
 	for start := 0; start < len(requests); start += batchSize {
 		end := min(start+batchSize, len(requests))
 		if err := l.batchWrite(ctx, logger, requests[start:end]); err != nil {
-			return fmt.Errorf("prepare-tokens: shards %d-%d: %w", start, end-1, err)
+			return fmt.Errorf("prepare-tokens: items %d-%d: %w", start, end-1, err)
 		}
 	}
 	// the bucket id may have been cached as unregistered by this instance
-	if l.ncache != nil {
-		l.ncache.c.Remove(bucketID)
-	}
+	l.ncache.Remove(bucketID)
+	l.rcache.AddUntil(bucketID, now.Add(l.rcacheTTL))
 	return nil
 }
 

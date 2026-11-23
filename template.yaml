@@ -50,6 +50,7 @@ Resources:
             - Sid: DynamoDBAccess
               Effect: Allow
               Action:
+                - dynamodb:GetItem
                 - dynamodb:UpdateItem
                 - dynamodb:BatchWriteItem
               Resource: !GetAtt Table.Arn

@@ -10,16 +10,22 @@ import (
 )
 
 type Config struct {
-	TableName        string            `json:"table_name"`
-	TokenPerInterval int64             `json:"token_per_interval"`
-	BucketSize       int64             `json:"bucket_size"`
-	Interval         time.Duration     `json:"interval,omitempty"`
+	TableName        string        `json:"table_name"`
+	TokenPerInterval int64         `json:"token_per_interval"`
+	BucketSize       int64         `json:"bucket_size"`
+	Interval         time.Duration `json:"interval,omitempty"`
+	// Shards is the number of shards per bucket. It is computed from the worst requests per second when zero.
+	// Set it explicitly when the expected traffic per bucket id is known.
+	// It can be changed at any time; shard items are created on demand.
+	Shards           int64             `json:"shards,omitempty"`
 	AdditionalConfig *AdditionalConfig `json:"additional,omitempty"`
 }
 
 type AdditionalConfig struct {
 	NegativeCache *NegativeCacheConfig `json:"negative_cache,omitempty"`
-	Anonymous     *AnonymousConfig     `json:"anonymous,omitempty"`
+	// RegistrationCache caches registered bucket ids. Revoked ids are allowed until the entry expires.
+	RegistrationCache *RegistrationCacheConfig `json:"registration_cache,omitempty"`
+	Anonymous         *AnonymousConfig         `json:"anonymous,omitempty"`
 	// FailOpen allows requests when DynamoDB fails. Requests are denied by default (fail-closed).
 	FailOpen bool `json:"fail_open,omitempty"`
 }
@@ -28,6 +34,14 @@ type AdditionalConfig struct {
 // Size is the maximum number of entries. specifying 0 means to disable cache.
 // TTL is how long an entry is kept. 5 minutes by default.
 type NegativeCacheConfig struct {
+	Size int           `json:"size"`
+	TTL  time.Duration `json:"ttl,omitempty"`
+}
+
+// RegistrationCacheConfig configures the cache of registered bucket ids.
+// Size is the maximum number of entries. specifying 0 means to disable cache (a read per request).
+// TTL is how long an entry is kept. 1 minute by default.
+type RegistrationCacheConfig struct {
 	Size int           `json:"size"`
 	TTL  time.Duration `json:"ttl,omitempty"`
 }
@@ -73,6 +87,21 @@ func cfgToOpts(c *Config) ([]Opt, error) {
 		}
 		opts = append(opts, withNegativeCache(size, ttl))
 	}
+
+	if cfg.RegistrationCache != nil {
+		size := cfg.RegistrationCache.Size
+		if size < 0 {
+			return nil, errors.New("registration_cache.size is specified but value is less than zero")
+		}
+		ttl := cfg.RegistrationCache.TTL
+		if ttl < 0 {
+			return nil, errors.New("registration_cache.ttl is specified but value is less than zero")
+		}
+		if ttl == 0 {
+			ttl = defaultRegistrationCacheTTL
+		}
+		opts = append(opts, withRegistrationCache(size, ttl))
+	}
 	return opts, nil
 }
 
@@ -102,7 +131,7 @@ func (cfg *Config) validate() error {
 	if interval == 0 {
 		interval = DefaultInterval
 	}
-	if _, err := newGCRA(cfg.TokenPerInterval, cfg.BucketSize, interval); err != nil {
+	if _, err := newGCRA(cfg.TokenPerInterval, cfg.BucketSize, interval, cfg.Shards); err != nil {
 		return err
 	}
 	if _, err := cfgToOpts(cfg); err != nil {

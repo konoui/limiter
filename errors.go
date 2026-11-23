@@ -14,6 +14,7 @@ var (
 	errInvalidRateLimitArg        = errors.New("token_per_interval must be greater than zero")
 	errInvalidRateLimitBucketSize = errors.New("bucket_size must be larger than or equal to token_per_interval")
 	errInvalidInterval            = errors.New("interval must be greater than or equal 1 sec")
+	errInvalidShards              = errors.New("invalid shards")
 	// ErrStoreThrottled means DynamoDB throttled the request. It is a server side capacity problem,
 	// not that the caller exceeded its rate limit. The caller's rate limit is reported by Decision.Allowed.
 	ErrStoreThrottled = errors.New("dynamodb throttled the request")

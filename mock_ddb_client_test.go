@@ -61,6 +61,26 @@ func (mr *MockDDBClientMockRecorder) BatchWriteItem(arg0, arg1 any, arg2 ...any)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BatchWriteItem", reflect.TypeOf((*MockDDBClient)(nil).BatchWriteItem), varargs...)
 }
 
+// GetItem mocks base method.
+func (m *MockDDBClient) GetItem(arg0 context.Context, arg1 *dynamodb.GetItemInput, arg2 ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{arg0, arg1}
+	for _, a := range arg2 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "GetItem", varargs...)
+	ret0, _ := ret[0].(*dynamodb.GetItemOutput)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetItem indicates an expected call of GetItem.
+func (mr *MockDDBClientMockRecorder) GetItem(arg0, arg1 any, arg2 ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{arg0, arg1}, arg2...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetItem", reflect.TypeOf((*MockDDBClient)(nil).GetItem), varargs...)
+}
+
 // UpdateItem mocks base method.
 func (m *MockDDBClient) UpdateItem(arg0 context.Context, arg1 *dynamodb.UpdateItemInput, arg2 ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
 	m.ctrl.T.Helper()

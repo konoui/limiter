@@ -10,6 +10,9 @@ const (
 	defaultNegativeCacheSize = 1000
 	defaultNegativeCacheTTL  = 5 * time.Minute
 	defaultDenyCacheSize     = 10000
+
+	defaultRegistrationCacheSize = 10000
+	defaultRegistrationCacheTTL  = time.Minute
 )
 
 // expiringCache is a size bounded LRU whose entries expire at a given time.
@@ -57,6 +60,13 @@ func (e *expiringCache) AddUntil(key string, expiresAt time.Time) {
 		return
 	}
 	e.c.Add(key, expiresAt)
+}
+
+func (e *expiringCache) Remove(key string) {
+	if e == nil {
+		return
+	}
+	e.c.Remove(key)
 }
 
 func (e *expiringCache) Len() int {

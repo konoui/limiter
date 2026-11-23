@@ -15,8 +15,25 @@ conditional `UpdateItem`. No read is needed: on a failed condition DynamoDB retu
 | denied | 1 failed write, then served by a local cache until `RetryAfter` (0 calls) |
 
 GCRA is equivalent to a token bucket that refills `token_per_interval` tokens per `interval` up to `bucket_size`.
-Large buckets are split into shards so that a single partition stays below its write capacity;
-a request picks a random shard.
+
+#### Shards
+
+A bucket is split into shards so that a single partition key stays below DynamoDB's 1000 WCU per second.
+A token bucket allows at most `bucket_size + token_per_interval * 1s / interval` requests in any second,
+no matter how many instances (e.g. Lambda) send them, and an allowed request takes up to 2 writes.
+The default number of shards keeps each shard under 500 allowed requests per second.
+Set `shards` explicitly when the expected traffic per bucket id is known.
+
+Requests try shards in random order and skip shards known to be exhausted, up to 2 writes per request.
+`Decision.Remaining` is the value of the selected shard.
+
+#### Registration
+
+`PrepareTokens` writes a registration item `<id>#meta`. Shard items `<id>#<n>` are created on demand,
+so `shards` (and the bucket settings) can be changed at any time without re-registering ids.
+Registered ids are cached per instance (`registration_cache`, 1 minute by default);
+deleting the registration item revokes an id after the cache expires.
+Ids registered by the token bucket version are still accepted.
 
 #### Usage
 
@@ -41,6 +58,7 @@ table_name: rate_limit
 token_per_interval: 20
 bucket_size: 40
 interval: 60s
+shards: 0                 # computed when zero
 additional:
   fail_open: false        # allow requests when DynamoDB fails
   anonymous:              # accept unregistered ids, e.g. IP addresses
@@ -48,6 +66,9 @@ additional:
   negative_cache:         # cache unregistered ids
     size: 1000
     ttl: 5m
+  registration_cache:     # cache registered ids (revocation delay)
+    size: 10000
+    ttl: 1m
 ```
 
 Unknown keys are rejected.

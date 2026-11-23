@@ -75,6 +75,16 @@ func names(in *dynamodb.UpdateItemInput) string {
 	return strings.Join(ret, ",")
 }
 
+// registered makes every bucket id registered (the registration item exists).
+func registered(t *testing.T, c *MockDDBClient) {
+	t.Helper()
+	meta, err := attributevalue.MarshalMap(&registrationItem{BucketIDShardID: "x" + metaSuffix, RegisteredAt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.EXPECT().GetItem(gomock.Any(), gomock.Any()).Return(&dynamodb.GetItemOutput{Item: meta}, nil).AnyTimes()
+}
+
 // idle path input
 func isIdle(in *dynamodb.UpdateItemInput) bool {
 	return !strings.Contains(*in.ConditionExpression, "BETWEEN")
@@ -88,15 +98,15 @@ func TestRateLimit_Allow(t *testing.T) {
 		mocker    func(t *testing.T, c *MockDDBClient, now int64)
 		want      Decision
 		wantErr   error
-		wantCalls int
 	}{
 		{
 			name: "idle bucket is allowed with a single write",
 			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
 				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
 					func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
-						if !isIdle(in) || !strings.Contains(*in.ConditionExpression, "attribute_exists") {
-							t.Errorf("registered mode must require the item: %s", *in.ConditionExpression)
+						// registration is checked by the registration item; shard items are created on demand
+						if !isIdle(in) || !strings.Contains(*in.ConditionExpression, "attribute_not_exists") {
+							t.Errorf("shard item should be created on demand: %s", *in.ConditionExpression)
 						}
 						if strings.Contains(names(in), attrTTL) {
 							t.Errorf("ttl must not be set in registered mode")
@@ -154,11 +164,14 @@ func TestRateLimit_Allow(t *testing.T) {
 			want: Decision{Allowed: false, RetryAfter: 2 * time.Second},
 		},
 		{
-			name: "unregistered bucket id",
+			name: "registered bucket whose shard item does not exist yet is created",
 			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
-				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, nil))
+				gomock.InOrder(
+					c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, nil)),
+					c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil),
+				)
 			},
-			wantErr: ErrInvalidBucketID,
+			want: Decision{Allowed: true, Remaining: 3},
 		},
 		{
 			name:      "anonymous bucket is created with ttl",
@@ -210,6 +223,7 @@ func TestRateLimit_Allow(t *testing.T) {
 			now := fixTime(t, 0)
 			c := NewMockDDBClient(gomock.NewController(t))
 			tt.mocker(t, c, now)
+			registered(t, c)
 
 			cfg := testConfig()
 			cfg.AdditionalConfig = &AdditionalConfig{FailOpen: tt.failOpen}
@@ -248,6 +262,7 @@ func TestRateLimit_Allow_invalidInput(t *testing.T) {
 func TestRateLimit_Allow_denyCache(t *testing.T) {
 	now := fixTime(t, 0)
 	c := NewMockDDBClient(gomock.NewController(t))
+	registered(t, c)
 	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
 		Return(nil, ccf(t, &ddbItem{TAT: now + tolerance + emission}))
 
@@ -281,7 +296,7 @@ func TestRateLimit_Allow_shardFallback(t *testing.T) {
 	t.Cleanup(func() { shardOrder = rand.Perm })
 
 	// 2 shards: emission 2ms, tolerance 998ms per shard
-	cfg := &Config{TableName: "dummy_table", TokenPerInterval: 1000, BucketSize: 1000, Interval: time.Second}
+	cfg := &Config{TableName: "dummy_table", TokenPerInterval: 1000, BucketSize: 1000, Interval: time.Second, Shards: 2}
 	const shardEmission, shardTolerance = int64(2 * time.Millisecond), int64(998 * time.Millisecond)
 	exhausted := func(retry int64) *ddbItem { return &ddbItem{TAT: now + shardTolerance + retry} }
 	shardOf := func(in *dynamodb.UpdateItemInput) string {
@@ -289,6 +304,7 @@ func TestRateLimit_Allow_shardFallback(t *testing.T) {
 	}
 
 	c := NewMockDDBClient(gomock.NewController(t))
+	registered(t, c)
 	reader, opt := newTestMeter()
 	rl, err := New(cfg, c, opt)
 	if err != nil {
@@ -359,6 +375,7 @@ func TestRateLimit_Allow_shardTriesAreBounded(t *testing.T) {
 	// 10 shards
 	cfg := &Config{TableName: "dummy_table", TokenPerInterval: 5000, BucketSize: 5000, Interval: time.Second}
 	c := NewMockDDBClient(gomock.NewController(t))
+	registered(t, c)
 	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
 		Return(nil, ccf(t, &ddbItem{TAT: now + int64(time.Hour)})).Times(maxShardTries)
 	rl, err := New(cfg, c)
@@ -370,11 +387,109 @@ func TestRateLimit_Allow_shardTriesAreBounded(t *testing.T) {
 	}
 }
 
+func getItemOut(t *testing.T, item any) *dynamodb.GetItemOutput {
+	t.Helper()
+	if item == nil {
+		return &dynamodb.GetItemOutput{}
+	}
+	attrs, err := attributevalue.MarshalMap(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &dynamodb.GetItemOutput{Item: attrs}
+}
+
+func pkOf(in *dynamodb.GetItemInput) string {
+	return in.Key[attrBucketIDShardID].(*types.AttributeValueMemberS).Value
+}
+
+func TestRateLimit_Allow_registration(t *testing.T) {
+	type legacyItem struct {
+		BucketIDShardID string `dynamodbav:"bucket_id_shard_id"`
+		TokenCount      int64  `dynamodbav:"token_count"`
+	}
+	tests := []struct {
+		name    string
+		meta    any
+		shard0  any
+		wantErr error
+	}{
+		{name: "registration item exists", meta: &registrationItem{BucketIDShardID: "k#meta"}},
+		{
+			name:   "registered by the token bucket version (no registration item)",
+			shard0: &legacyItem{BucketIDShardID: "k#0", TokenCount: 3},
+		},
+		{
+			// e.g. revoked by deleting the registration item. the shard item remains.
+			name:    "shard item without the registration item is not registered",
+			shard0:  &ddbItem{BucketIDShardID: "k#0", TAT: 1},
+			wantErr: ErrInvalidBucketID,
+		},
+		{name: "nothing exists", wantErr: ErrInvalidBucketID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixTime(t, 0)
+			c := NewMockDDBClient(gomock.NewController(t))
+			c.EXPECT().GetItem(gomock.Any(), gomock.Any()).DoAndReturn(
+				func(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+					if !aws.ToBool(in.ConsistentRead) {
+						t.Error("registration must be read consistently")
+					}
+					switch pkOf(in) {
+					case "k#meta":
+						return getItemOut(t, tt.meta), nil
+					case "k#0":
+						return getItemOut(t, tt.shard0), nil
+					}
+					t.Fatalf("unexpected key %s", pkOf(in))
+					return nil, nil
+				}).MaxTimes(2)
+			if tt.wantErr == nil {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil).Times(2)
+			}
+
+			rl, err := New(testConfig(), c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				// the second call is served by the registration cache or the negative cache
+				d, err := rl.Allow(context.Background(), "k")
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("[%d] want %v, got %v", i, tt.wantErr, err)
+				}
+				if (err == nil) != d.Allowed {
+					t.Errorf("[%d] unexpected decision %+v", i, d)
+				}
+			}
+		})
+	}
+}
+
+func TestRateLimit_Allow_registrationReadFailure(t *testing.T) {
+	fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	c.EXPECT().GetItem(gomock.Any(), gomock.Any()).
+		Return(nil, &types.ProvisionedThroughputExceededException{Message: aws.String("slow down")})
+	rl, err := New(testConfig(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := rl.Allow(context.Background(), "k")
+	if !errors.Is(err, ErrStoreThrottled) || d.Allowed {
+		t.Fatalf("want denied with %v, got %+v %v", ErrStoreThrottled, d, err)
+	}
+	if rl.ncache.Contains("k") {
+		t.Error("a read failure must not be cached as unregistered")
+	}
+}
+
 // An unregistered id is cached per limiter with a TTL, and PrepareTokens clears it.
 func TestRateLimit_Allow_negativeCache(t *testing.T) {
 	fixTime(t, 0)
 	c := NewMockDDBClient(gomock.NewController(t))
-	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, nil))
+	c.EXPECT().GetItem(gomock.Any(), gomock.Any()).Return(&dynamodb.GetItemOutput{}, nil).Times(2)
 
 	a, err := New(testConfig(), c)
 	if err != nil {
@@ -403,6 +518,9 @@ func TestRateLimit_Allow_negativeCache(t *testing.T) {
 	if a.ncache.Contains("unknown") {
 		t.Error("PrepareTokens should remove the id from the negative cache")
 	}
+	if !a.rcache.Contains("unknown") {
+		t.Error("PrepareTokens should add the id to the registration cache")
+	}
 
 	a.ncache.AddUntil("expiring", timeNow().Add(defaultNegativeCacheTTL))
 	fixTime(t, defaultNegativeCacheTTL)
@@ -412,13 +530,13 @@ func TestRateLimit_Allow_negativeCache(t *testing.T) {
 }
 
 func TestRateLimit_PrepareTokens(t *testing.T) {
-	t.Run("puts a full bucket per shard", func(t *testing.T) {
+	t.Run("puts a full bucket per shard and the registration item last", func(t *testing.T) {
 		c := NewMockDDBClient(gomock.NewController(t))
 		c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).DoAndReturn(
 			func(_ context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
 				reqs := in.RequestItems["dummy_table"]
-				if len(reqs) != 1 {
-					t.Fatalf("want 1 shard, got %d", len(reqs))
+				if len(reqs) != 2 {
+					t.Fatalf("want 1 shard and the registration item, got %d", len(reqs))
 				}
 				item := new(ddbItem)
 				if err := attributevalue.UnmarshalMap(reqs[0].PutRequest.Item, item); err != nil {
@@ -426,6 +544,13 @@ func TestRateLimit_PrepareTokens(t *testing.T) {
 				}
 				if item.BucketIDShardID != "key#0" || item.TAT != 0 {
 					t.Errorf("unexpected item %+v", item)
+				}
+				reg := new(registrationItem)
+				if err := attributevalue.UnmarshalMap(reqs[1].PutRequest.Item, reg); err != nil {
+					t.Fatal(err)
+				}
+				if reg.BucketIDShardID != "key#meta" || reg.RegisteredAt == 0 {
+					t.Errorf("unexpected registration item %+v", reg)
 				}
 				return &dynamodb.BatchWriteItemOutput{}, nil
 			})
@@ -495,6 +620,7 @@ func TestRateLimit_errorsAndLogsAreRedacted(t *testing.T) {
 		t.Run(fmt.Sprintf("%T", upstream), func(t *testing.T) {
 			fixTime(t, 0)
 			c := NewMockDDBClient(gomock.NewController(t))
+			registered(t, c)
 			c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, upstream)
 			logs := &bytes.Buffer{}
 			reader, meterOpt := newTestMeter()
@@ -555,6 +681,7 @@ func collectCounters(t *testing.T, reader *sdkmetric.ManualReader) map[string]ma
 func TestRateLimit_metrics(t *testing.T) {
 	now := fixTime(t, 0)
 	c := NewMockDDBClient(gomock.NewController(t))
+	registered(t, c)
 	gomock.InOrder(
 		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil),
 		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, &ddbItem{TAT: now + tolerance + emission})),
@@ -709,6 +836,47 @@ func TestRateLimit_WithDynamoDBLocal(t *testing.T) {
 		}
 		if want := time.Unix(0, now).Add(time.Hour).Unix(); item.TTL != want {
 			t.Errorf("ttl: want %d, got %d", want, item.TTL)
+		}
+	})
+
+	t.Run("changing the number of shards keeps registered ids valid", func(t *testing.T) {
+		before := testRateLimit(t, testConfig())
+		id := uniqueID("reshard")
+		fixTime(t, 0)
+		if err := before.PrepareTokens(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig()
+		cfg.Shards = 2
+		after := testRateLimit(t, cfg)
+		for i := 0; i < 4; i++ {
+			if d, err := after.Allow(ctx, id); err != nil {
+				t.Fatalf("[%d] registered id must stay valid: %+v %v", i, d, err)
+			}
+		}
+	})
+
+	t.Run("deleting the registration item revokes the id", func(t *testing.T) {
+		l := testRateLimit(t, testConfig())
+		id := uniqueID("revoke")
+		fixTime(t, 0)
+		if err := l.PrepareTokens(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		if d, err := l.Allow(ctx, id); err != nil || !d.Allowed {
+			t.Fatalf("want allowed: %+v %v", d, err)
+		}
+		_, err := l.client.c.(*dynamodb.Client).DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName: &l.tableName,
+			Key:       map[string]types.AttributeValue{attrBucketIDShardID: &types.AttributeValueMemberS{Value: metaPartitionKey(id)}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// another instance (no registration cache entry)
+		other := testRateLimit(t, testConfig())
+		if _, err := other.Allow(ctx, id); !errors.Is(err, ErrInvalidBucketID) {
+			t.Fatalf("want %v, got %v", ErrInvalidBucketID, err)
 		}
 	})
 

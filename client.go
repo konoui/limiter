@@ -14,6 +14,7 @@ import (
 //
 //go:generate go tool mockgen -source=$GOFILE -destination=mock_ddb_client_test.go -package=$GOPACKAGE
 type DDBClient interface {
+	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 }
@@ -22,6 +23,16 @@ type DDBClient interface {
 type wrappedDDBClient struct {
 	c       DDBClient
 	metrics *metrics
+}
+
+func (c *wrappedDDBClient) GetItem(ctx context.Context, logger *slog.Logger,
+	input *dynamodb.GetItemInput, params ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	resp, err := c.c.GetItem(ctx, input, params...)
+	if err != nil {
+		return nil, c.classify(ctx, "GetItem", err)
+	}
+	debugResponse(ctx, logger, "get-item", resp.ResultMetadata, resp.ConsumedCapacity)
+	return resp, nil
 }
 
 func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
