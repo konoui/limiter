@@ -17,6 +17,8 @@ const (
 	resultDenied  = "denied"
 	resultInvalid = "invalid"
 	resultError   = "error"
+	// resultContention is a denial because every shard tried was busy with concurrent updates
+	resultContention = "contention"
 
 	sourceDynamoDB = "dynamodb"
 	sourceCache    = "cache"

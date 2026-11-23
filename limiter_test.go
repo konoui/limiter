@@ -729,6 +729,51 @@ func collectCounters(t *testing.T, reader *sdkmetric.ManualReader) map[string]ma
 	return ret
 }
 
+// The library logs only at debug level. Errors are returned to the caller and must not be logged twice.
+func TestRateLimit_logsOnlyAtDebug(t *testing.T) {
+	now := fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	registered(t, c)
+	gomock.InOrder(
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, &types.InternalServerError{Message: aws.String("boom")}),
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, &ddbItem{TAT: now + emission})).Times(maxAttempts),
+	)
+	logs := &bytes.Buffer{}
+	rl, err := New(testConfig(), c, WithLogger(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := rl.Allow(ctx, "error"); !errors.Is(err, ErrInternal) {
+		t.Fatalf("want %v, got %v", ErrInternal, err)
+	}
+	if d, err := rl.Allow(ctx, "contention"); err != nil || d.Allowed {
+		t.Fatalf("want denied by contention: %+v %v", d, err)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("no logs above debug level are expected: %s", logs.String())
+	}
+}
+
+func TestRateLimit_metrics_contention(t *testing.T) {
+	now := fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	registered(t, c)
+	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, &ddbItem{TAT: now + emission})).Times(maxAttempts)
+	reader, opt := newTestMeter()
+	rl, err := New(testConfig(), c, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := rl.Allow(context.Background(), "k"); err != nil || d.Allowed || d.RetryAfter != 2*time.Second {
+		t.Fatalf("want denied for an emission interval: %+v %v", d, err)
+	}
+	got := collectCounters(t, reader)["limiter.decisions"]
+	if got["limiter.result=contention,limiter.source=dynamodb,limiter.table=dummy_table"] != 1 {
+		t.Errorf("contention should be counted separately from the rate limit: %v", got)
+	}
+}
+
 func TestRateLimit_metrics(t *testing.T) {
 	now := fixTime(t, 0)
 	c := NewMockDDBClient(gomock.NewController(t))
