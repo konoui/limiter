@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"sync"
@@ -270,6 +271,102 @@ func TestRateLimit_Allow_denyCache(t *testing.T) {
 	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil)
 	if d, err := rl.Allow(ctx, "dummy"); err != nil || !d.Allowed {
 		t.Fatalf("should be allowed after retry-after: %+v %v", d, err)
+	}
+}
+
+// A denied shard is skipped and another shard is tried, so a request is not denied while other shards have tokens.
+func TestRateLimit_Allow_shardFallback(t *testing.T) {
+	now := fixTime(t, 0)
+	shardOrder = func(n int) []int { return []int{0, 1} }
+	t.Cleanup(func() { shardOrder = rand.Perm })
+
+	// 2 shards: emission 2ms, tolerance 998ms per shard
+	cfg := &Config{TableName: "dummy_table", TokenPerInterval: 1000, BucketSize: 1000, Interval: time.Second}
+	const shardEmission, shardTolerance = int64(2 * time.Millisecond), int64(998 * time.Millisecond)
+	exhausted := func(retry int64) *ddbItem { return &ddbItem{TAT: now + shardTolerance + retry} }
+	shardOf := func(in *dynamodb.UpdateItemInput) string {
+		return in.Key[attrBucketIDShardID].(*types.AttributeValueMemberS).Value
+	}
+
+	c := NewMockDDBClient(gomock.NewController(t))
+	reader, opt := newTestMeter()
+	rl, err := New(cfg, c, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rl.gcra.shards) != 2 {
+		t.Fatalf("want 2 shards, got %d", len(rl.gcra.shards))
+	}
+	ctx := context.Background()
+
+	// shard 0 is exhausted, shard 1 allows
+	gomock.InOrder(
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+				if shardOf(in) != "k#0" {
+					t.Errorf("want shard 0 first, got %s", shardOf(in))
+				}
+				return nil, ccf(t, exhausted(3*shardEmission))
+			}),
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+				if shardOf(in) != "k#1" {
+					t.Errorf("want fallback to shard 1, got %s", shardOf(in))
+				}
+				return &dynamodb.UpdateItemOutput{}, nil
+			}),
+	)
+	if d, err := rl.Allow(ctx, "k"); err != nil || !d.Allowed {
+		t.Fatalf("should fall back to shard 1: %+v %v", d, err)
+	}
+
+	// shard 0 is skipped by the cache without a write; shard 1 is now exhausted
+	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+			if shardOf(in) != "k#1" {
+				t.Errorf("shard 0 should be skipped, got %s", shardOf(in))
+			}
+			return nil, ccf(t, exhausted(shardEmission))
+		})
+	d, err := rl.Allow(ctx, "k")
+	if err != nil || d.Allowed {
+		t.Fatalf("both shards are exhausted: %+v %v", d, err)
+	}
+	if d.RetryAfter != time.Duration(shardEmission) {
+		t.Errorf("retry-after should be the earliest of the shards: %v", d.RetryAfter)
+	}
+
+	// all shards are cached: no write
+	if d, err := rl.Allow(ctx, "k"); err != nil || d.Allowed {
+		t.Fatalf("should be denied by the cache: %+v %v", d, err)
+	}
+
+	got := collectCounters(t, reader)["limiter.decisions"]
+	for attrs, want := range map[string]int64{
+		"limiter.result=allowed,limiter.source=dynamodb,limiter.table=dummy_table": 1,
+		"limiter.result=denied,limiter.source=dynamodb,limiter.table=dummy_table":  1,
+		"limiter.result=denied,limiter.source=cache,limiter.table=dummy_table":     1,
+	} {
+		if got[attrs] != want {
+			t.Errorf("%s: want %d, got %d", attrs, want, got[attrs])
+		}
+	}
+}
+
+// Writes per request are bounded even when many shards are exhausted.
+func TestRateLimit_Allow_shardTriesAreBounded(t *testing.T) {
+	now := fixTime(t, 0)
+	// 10 shards
+	cfg := &Config{TableName: "dummy_table", TokenPerInterval: 5000, BucketSize: 5000, Interval: time.Second}
+	c := NewMockDDBClient(gomock.NewController(t))
+	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+		Return(nil, ccf(t, &ddbItem{TAT: now + int64(time.Hour)})).Times(maxShardTries)
+	rl, err := New(cfg, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := rl.Allow(context.Background(), "k"); err != nil || d.Allowed {
+		t.Fatalf("want denied: %+v %v", d, err)
 	}
 }
 

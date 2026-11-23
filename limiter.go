@@ -19,8 +19,9 @@ import (
 
 var (
 	// for tests
-	timeNow   = time.Now
-	pickShard = rand.IntN //nolint:gosec // shard selection is not security sensitive
+	timeNow = time.Now
+	// shardOrder returns shard ids in the order to try
+	shardOrder = rand.Perm //nolint:gosec // shard selection is not security sensitive
 
 	_ LimitPreparer = &RateLimit{}
 )
@@ -28,7 +29,9 @@ var (
 const (
 	// maxAttempts bounds retries caused by concurrent updates of the same shard
 	maxAttempts = 3
-	batchSize   = 25
+	// maxShardTries bounds DynamoDB writes per request when shards are denied
+	maxShardTries = 2
+	batchSize     = 25
 )
 
 // Decision is the result of Allow.
@@ -160,7 +163,11 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 	return l, nil
 }
 
-// Allow consumes a token of a randomly selected shard of the bucket.
+// Allow consumes a token of the bucket.
+//
+// A sharded bucket tries shards in random order. Shards known to be exhausted (the local deny cache) are skipped,
+// and a shard denied by DynamoDB is cached and the next shard is tried, up to maxShardTries writes.
+// Without this fallback a request could be denied while other shards still have tokens.
 func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error) {
 	if bucketID == "" {
 		l.metrics.recordDecision(ctx, resultInvalid, sourceCache)
@@ -175,46 +182,63 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		return Decision{}, fmt.Errorf("bucket %s: unregistered bucket id (cached): %w", redactID(bucketID), ErrInvalidBucketID)
 	}
 
-	shardID := pickShard(len(l.gcra.shards))
-	logger := l.logger.With(
+	baseLogger := l.logger.With(
 		slog.String("table_name", l.tableName),
 		slog.String("bucket_id", redactID(bucketID)),
-		slog.Int("shard_id", shardID),
 	)
 	now := timeNow()
-	pk := makePartitionKey(bucketID, shardID)
-
-	if until, ok := l.dcache.Get(pk); ok {
-		d := Decision{Allowed: false, RetryAfter: until.Sub(now)}
-		logger.DebugContext(ctx, "denied by the local cache", slog.Duration("retry_after", d.RetryAfter))
-		l.metrics.recordDecision(ctx, resultDenied, sourceCache)
-		return d, nil
-	}
-
-	d, err := l.allow(ctx, logger, bucketID, shardID, now.UnixNano())
-	if err != nil {
-		err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
-		if errors.Is(err, ErrInvalidBucketID) {
-			l.ncache.AddUntil(bucketID, now.Add(l.ncacheTTL))
-			l.metrics.recordDecision(ctx, resultInvalid, sourceDynamoDB)
-			return Decision{}, err
+	tries := 0
+	var denied Decision // the earliest retry among denied shards
+	for _, shardID := range shardOrder(len(l.gcra.shards)) {
+		logger := baseLogger.With(slog.Int("shard_id", shardID))
+		pk := makePartitionKey(bucketID, shardID)
+		if until, ok := l.dcache.Get(pk); ok {
+			denied = earlier(denied, until.Sub(now))
+			logger.DebugContext(ctx, "skip a shard denied by the local cache")
+			continue
 		}
-		logger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
-		l.metrics.recordDecision(ctx, resultError, sourceDynamoDB)
-		return Decision{Allowed: l.failOpen}, err
+		if tries == maxShardTries {
+			break
+		}
+		tries++
+
+		d, err := l.allow(ctx, logger, bucketID, shardID, now.UnixNano())
+		if err != nil {
+			err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
+			if errors.Is(err, ErrInvalidBucketID) {
+				l.ncache.AddUntil(bucketID, now.Add(l.ncacheTTL))
+				l.metrics.recordDecision(ctx, resultInvalid, sourceDynamoDB)
+				return Decision{}, err
+			}
+			logger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
+			l.metrics.recordDecision(ctx, resultError, sourceDynamoDB)
+			return Decision{Allowed: l.failOpen}, err
+		}
+		if d.Allowed {
+			l.metrics.recordDecision(ctx, resultAllowed, sourceDynamoDB)
+			logger.DebugContext(ctx, "allowed", slog.Int64("remaining", d.Remaining))
+			return d, nil
+		}
+		l.dcache.AddUntil(pk, now.Add(d.RetryAfter))
+		denied = earlier(denied, d.RetryAfter)
+		logger.DebugContext(ctx, "shard denied", slog.Duration("retry_after", d.RetryAfter))
 	}
 
-	result := resultAllowed
-	if !d.Allowed {
-		l.dcache.AddUntil(pk, now.Add(d.RetryAfter))
-		result = resultDenied
+	source := sourceDynamoDB
+	if tries == 0 {
+		source = sourceCache
 	}
-	l.metrics.recordDecision(ctx, result, sourceDynamoDB)
-	logger.DebugContext(ctx, "result",
-		slog.Bool("allowed", d.Allowed),
-		slog.Int64("remaining", d.Remaining),
-		slog.Duration("retry_after", d.RetryAfter))
-	return d, nil
+	l.metrics.recordDecision(ctx, resultDenied, source)
+	baseLogger.DebugContext(ctx, "denied", slog.String("source", source), slog.Duration("retry_after", denied.RetryAfter))
+	return denied, nil
+}
+
+// earlier returns a denied Decision with the earlier RetryAfter.
+func earlier(d Decision, retryAfter time.Duration) Decision {
+	if d.RetryAfter == 0 || retryAfter < d.RetryAfter {
+		d.RetryAfter = retryAfter
+	}
+	return d
 }
 
 type writePath int
