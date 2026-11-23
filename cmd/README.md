@@ -6,7 +6,7 @@
 | `limiter start-server --config-file <path>` | serve the example API on `:8080` |
 | `limiter create-token --config-file <path> --config-name default` | issue an API key (the only way; keys are not issued over HTTP) |
 | `limiter revoke-token --config-file <path> --config-name default --token <key>` | revoke an API key. Running instances allow it until their registration cache expires (1 minute by default) |
-| `limiter create-table --table-name <name>` | create a table for local development. On AWS, `template.yaml` creates it |
+| `limiter create-table --table-name <name>` | create a table with TTL enabled on the `ttl` attribute |
 
 With DynamoDB Local, point the SDK to it with the standard environment variable:
 
