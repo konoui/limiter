@@ -102,9 +102,10 @@ func (l *RateLimit) RevokeTokens(ctx context.Context, bucketID string) error {
 		return fmt.Errorf("revoke-tokens: bucket id must be 1 to %d bytes: %w", l.maxLength, ErrInvalidBucketID)
 	}
 	logger := l.logger.With(slog.String("bucket_id", redactID(bucketID)))
-	keys := []string{metaPartitionKey(bucketID)}
+	key := l.storageKey(bucketID)
+	keys := []string{metaPartitionKey(key)}
 	// ids registered by the token bucket version are recognized by shard 0
-	keys = append(keys, makePartitionKey(bucketID, 0))
+	keys = append(keys, makePartitionKey(key, 0))
 	for _, pk := range keys {
 		_, err := l.client.DeleteItem(ctx, logger, &dynamodb.DeleteItemInput{
 			TableName: &l.tableName,
@@ -114,8 +115,8 @@ func (l *RateLimit) RevokeTokens(ctx context.Context, bucketID string) error {
 			return fmt.Errorf("revoke-tokens: %w", err)
 		}
 	}
-	l.rcache.Remove(bucketID)
-	l.ncache.AddUntil(bucketID, timeNow().Add(l.ncacheTTL))
+	l.rcache.Remove(key)
+	l.ncache.AddUntil(key, timeNow().Add(l.ncacheTTL))
 	return nil
 }
 

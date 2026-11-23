@@ -729,6 +729,77 @@ func collectCounters(t *testing.T, reader *sdkmetric.ManualReader) map[string]ma
 	return ret
 }
 
+// A named limiter prefixes every item key with its name and records it as a metric attribute.
+func TestRateLimit_name(t *testing.T) {
+	fixTime(t, 0)
+	cfg := testConfig()
+	cfg.Name = "user"
+	c := NewMockDDBClient(gomock.NewController(t))
+	keys := []string{}
+	record := func(pk string) { keys = append(keys, pk) }
+	meta, err := attributevalue.MarshalMap(&registrationItem{BucketIDShardID: "user#k#meta", RegisteredAt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gomock.InOrder(
+		c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+				for _, r := range in.RequestItems["dummy_table"] {
+					record(r.PutRequest.Item[attrBucketIDShardID].(*types.AttributeValueMemberS).Value)
+				}
+				return &dynamodb.BatchWriteItemOutput{}, nil
+			}),
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+				record(in.Key[attrBucketIDShardID].(*types.AttributeValueMemberS).Value)
+				return &dynamodb.UpdateItemOutput{}, nil
+			}),
+		c.EXPECT().DeleteItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+				record(in.Key[attrBucketIDShardID].(*types.AttributeValueMemberS).Value)
+				return &dynamodb.DeleteItemOutput{}, nil
+			}).Times(2),
+	)
+	// another instance reads the registration item with the prefixed key
+	c.EXPECT().GetItem(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+			record(pkOf(in))
+			return &dynamodb.GetItemOutput{Item: meta}, nil
+		})
+
+	reader, opt := newTestMeter()
+	rl, err := New(cfg, c, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := rl.PrepareTokens(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	other, err := New(cfg, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := other.Allow(ctx, "k"); err != nil || !d.Allowed {
+		t.Fatalf("want allowed: %+v %v", d, err)
+	}
+	if err := rl.RevokeTokens(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "user#k#0,user#k#meta,user#k#meta,user#k#0,user#k#meta,user#k#0"
+	if got := strings.Join(keys, ","); got != want {
+		t.Errorf("keys:\nwant %s\ngot  %s", want, got)
+	}
+
+	// metrics of the first limiter: the invalid id below carries limiter.name
+	_, _ = rl.Allow(ctx, "")
+	got := collectCounters(t, reader)["limiter.decisions"]
+	if got["limiter.name=user,limiter.result=invalid,limiter.source=cache,limiter.table=dummy_table"] != 1 {
+		t.Errorf("limiter.name should be recorded: %v", got)
+	}
+}
+
 // The library logs only at debug level. Errors are returned to the caller and must not be logged twice.
 func TestRateLimit_logsOnlyAtDebug(t *testing.T) {
 	now := fixTime(t, 0)
@@ -970,6 +1041,28 @@ func TestRateLimit_WithDynamoDBLocal(t *testing.T) {
 		other := testRateLimit(t, testConfig())
 		if _, err := other.Allow(ctx, id); !errors.Is(err, ErrInvalidBucketID) {
 			t.Fatalf("want %v, got %v", ErrInvalidBucketID, err)
+		}
+	})
+
+	t.Run("named limiters sharing a table do not affect each other", func(t *testing.T) {
+		anonymous := &AdditionalConfig{Anonymous: &AnonymousConfig{RecordTTL: time.Hour}}
+		globalCfg := testConfig()
+		globalCfg.Name, globalCfg.AdditionalConfig = "global", anonymous
+		// a much slower limiter: a request would push a shared TAT far ahead
+		userCfg := &Config{Name: "user", TokenPerInterval: 1, BucketSize: 1, Interval: time.Hour, AdditionalConfig: anonymous}
+		global := testRateLimit(t, globalCfg)
+		user := testRateLimit(t, userCfg)
+		fixTime(t, 0)
+
+		// the same bucket id, e.g. chosen by a client
+		id := uniqueID("shared")
+		for i := 0; i < 3; i++ {
+			_, _ = user.Allow(ctx, id)
+		}
+		for i := 0; i < int(globalCfg.BucketSize); i++ {
+			if d, err := global.Allow(ctx, id); err != nil || !d.Allowed {
+				t.Fatalf("[%d] global must not be affected by user: %+v %v", i, d, err)
+			}
 		}
 	})
 

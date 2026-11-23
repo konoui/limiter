@@ -72,6 +72,8 @@ type RateLimit struct {
 	client    *wrappedDDBClient
 	gcra      *gcra
 	tableName string
+	// name namespaces item keys and metrics. See Config.Name.
+	name      string
 	anonymous bool
 	ttl       time.Duration
 	failOpen  bool
@@ -151,6 +153,7 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 	l := &RateLimit{
 		gcra:      g,
 		tableName: cfg.TableName,
+		name:      cfg.Name,
 		ncache:    newExpiringCache(defaultNegativeCacheSize),
 		ncacheTTL: defaultNegativeCacheTTL,
 		rcache:    newExpiringCache(defaultRegistrationCacheSize),
@@ -165,7 +168,7 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 		}
 	}
 
-	m, err := newMetrics(l.meterProvider, l.tableName)
+	m, err := newMetrics(l.meterProvider, l.tableName, l.name)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +203,9 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 			slog.String("bucket_id", redactID(bucketID)),
 		)
 	}
-	if source, err := l.checkRegistered(ctx, baseLogger, bucketID); err != nil {
+	// the key of DynamoDB items and local caches, namespaced by Config.Name
+	key := l.storageKey(bucketID)
+	if source, err := l.checkRegistered(ctx, baseLogger, key); err != nil {
 		err = fmt.Errorf("bucket %s: %w", redactID(bucketID), err)
 		if errors.Is(err, ErrInvalidBucketID) {
 			l.metrics.recordDecision(ctx, resultInvalid, source)
@@ -218,7 +223,7 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		if debug {
 			logger = baseLogger.With(slog.Int("shard_id", shardID))
 		}
-		pk := makePartitionKey(bucketID, shardID)
+		pk := makePartitionKey(key, shardID)
 		if until, ok := l.dcache.Get(pk); ok {
 			denied = earlier(denied, until.Sub(now))
 			logger.DebugContext(ctx, "skip a shard denied by the local cache")
@@ -229,7 +234,7 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		}
 		tries++
 
-		d, isContended, err := l.allow(ctx, logger, bucketID, shardID, now.UnixNano())
+		d, isContended, err := l.allow(ctx, logger, key, shardID, now.UnixNano())
 		if err != nil {
 			err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
 			logger.DebugContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
@@ -417,12 +422,13 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 	}
 	logger := l.logger.With(slog.String("bucket_id", redactID(bucketID)))
 	now := timeNow()
+	key := l.storageKey(bucketID)
 
 	// shard items are reset here, but they are also created on demand
 	requests := make([]types.WriteRequest, 0, len(l.gcra.shards)+1)
 	for shardID, s := range l.gcra.shards {
 		attrs, err := attributevalue.MarshalMap(&ddbItem{
-			BucketIDShardID: makePartitionKey(bucketID, shardID),
+			BucketIDShardID: makePartitionKey(key, shardID),
 			// zero means TAT < now, i.e. the bucket is full
 			TAT: 0,
 			TTL: l.shardExpiry(now.UnixNano(), s),
@@ -433,7 +439,7 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 		requests = append(requests, types.WriteRequest{PutRequest: &types.PutRequest{Item: attrs}})
 	}
 	// the registration item is written last, so that a registered id always has reset shards
-	reg, err := registrationRequest(bucketID, now)
+	reg, err := registrationRequest(key, now)
 	if err != nil {
 		return fmt.Errorf("prepare-tokens: %w", err)
 	}
@@ -446,9 +452,18 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 		}
 	}
 	// the bucket id may have been cached as unregistered by this instance
-	l.ncache.Remove(bucketID)
-	l.rcache.AddUntil(bucketID, now.Add(l.rcacheTTL))
+	l.ncache.Remove(key)
+	l.rcache.AddUntil(key, now.Add(l.rcacheTTL))
 	return nil
+}
+
+// storageKey returns the key of DynamoDB items for a bucket id.
+// It is "<name>#<bucket id>" when Config.Name is set, so that limiters can share a table.
+func (l *RateLimit) storageKey(bucketID string) string {
+	if l.name == "" {
+		return bucketID
+	}
+	return l.name + delimiter + bucketID
 }
 
 func (l *RateLimit) batchWrite(ctx context.Context, logger *slog.Logger, requests []types.WriteRequest) error {

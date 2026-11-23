@@ -4,12 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
 )
 
 type Config struct {
+	// Name namespaces DynamoDB item keys ("<name>#<bucket id>#...") and is recorded as the limiter.name metric attribute.
+	// Every limiter sharing a table must have a distinct name; otherwise a bucket id chosen by a client could
+	// address another limiter's items. Optional for a limiter that owns its table. It must not contain "#".
+	Name             string        `json:"name,omitempty"`
 	TableName        string        `json:"table_name"`
 	TokenPerInterval int64         `json:"token_per_interval"`
 	BucketSize       int64         `json:"bucket_size"`
@@ -126,6 +131,10 @@ func newConfig(ro io.Reader) (*Config, error) {
 func (cfg *Config) validate() error {
 	if cfg.TableName == "" {
 		return errors.New("table_name must not be empty")
+	}
+	// "a#b" could collide with name "a" and a bucket id "b#..."
+	if strings.Contains(cfg.Name, delimiter) {
+		return fmt.Errorf("name must not contain %q", delimiter)
 	}
 	interval := cfg.Interval
 	if interval == 0 {

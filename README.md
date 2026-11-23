@@ -38,6 +38,17 @@ Ids registered by the token bucket version are still accepted.
 Shard items expire by DynamoDB TTL one hour after their bucket becomes full again (or after `record_ttl`
 in anonymous mode, whichever is later), so idle, revoked and orphan items do not accumulate.
 
+#### Sharing a table
+
+Several limiters (e.g. a global limit and a per-user limit) can share one table when each has a distinct `name`.
+Item keys become `<name>#<id>#<n>` and metrics carry `limiter.name`.
+Without names, a bucket id chosen by a client (e.g. `global`) could address another limiter's items
+and exhaust it with that limiter's much slower settings. `name` must not contain `#`.
+Ids registered by the token bucket version are recognized only by limiters without a name.
+
+When chaining limiters, apply the narrower one first (per user, then global),
+so that requests denied by the per-user limit do not consume the global budget.
+
 #### Usage
 
 ```go
@@ -76,6 +87,7 @@ bucket_size: 40
 All options with their defaults:
 
 ```yaml
+# name: user              # required only when limiters share a table (see Sharing a table)
 table_name: rate_limit
 token_per_interval: 20
 bucket_size: 40
@@ -102,8 +114,8 @@ It depends only on the OpenTelemetry API; configure an SDK and exporter in your 
 
 | metric | attributes |
 |---|---|
-| `limiter.decisions` | `limiter.table`, `limiter.result` (allowed / denied / contention / invalid / error), `limiter.source` (dynamodb / cache) |
-| `limiter.dynamodb.throttles` | `limiter.table`, `aws.dynamodb.operation` |
+| `limiter.decisions` | `limiter.table`, `limiter.name` (when set), `limiter.result` (allowed / denied / contention / invalid / error), `limiter.source` (dynamodb / cache) |
+| `limiter.dynamodb.throttles` | `limiter.table`, `limiter.name` (when set), `aws.dynamodb.operation` |
 
 `contention` is a denial because every shard tried was busy with concurrent updates, not over the rate limit.
 

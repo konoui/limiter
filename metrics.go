@@ -26,6 +26,7 @@ const (
 
 var (
 	attrKeyTable     = attribute.Key("limiter.table")
+	attrKeyName      = attribute.Key("limiter.name")
 	attrKeyResult    = attribute.Key("limiter.result")
 	attrKeySource    = attribute.Key("limiter.source")
 	attrKeyOperation = attribute.Key("aws.dynamodb.operation")
@@ -36,10 +37,11 @@ var (
 type metrics struct {
 	decisions metric.Int64Counter
 	throttles metric.Int64Counter
-	table     attribute.KeyValue
+	// base attributes of every data point: limiter.table, and limiter.name when Config.Name is set
+	base []attribute.KeyValue
 }
 
-func newMetrics(mp metric.MeterProvider, table string) (*metrics, error) {
+func newMetrics(mp metric.MeterProvider, table, name string) (*metrics, error) {
 	if mp == nil {
 		mp = otel.GetMeterProvider()
 	}
@@ -56,13 +58,19 @@ func newMetrics(mp metric.MeterProvider, table string) (*metrics, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create limiter.dynamodb.throttles counter: %w", err)
 	}
-	return &metrics{decisions: decisions, throttles: throttles, table: attrKeyTable.String(table)}, nil
+	base := []attribute.KeyValue{attrKeyTable.String(table)}
+	if name != "" {
+		base = append(base, attrKeyName.String(name))
+	}
+	return &metrics{decisions: decisions, throttles: throttles, base: base}, nil
 }
 
 func (m *metrics) recordDecision(ctx context.Context, result, source string) {
-	m.decisions.Add(ctx, 1, metric.WithAttributes(m.table, attrKeyResult.String(result), attrKeySource.String(source)))
+	m.decisions.Add(ctx, 1, metric.WithAttributes(append(m.base[:len(m.base):len(m.base)],
+		attrKeyResult.String(result), attrKeySource.String(source))...))
 }
 
 func (m *metrics) recordStoreThrottle(ctx context.Context, operation string) {
-	m.throttles.Add(ctx, 1, metric.WithAttributes(m.table, attrKeyOperation.String(operation)))
+	m.throttles.Add(ctx, 1, metric.WithAttributes(append(m.base[:len(m.base):len(m.base)],
+		attrKeyOperation.String(operation))...))
 }

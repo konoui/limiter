@@ -26,6 +26,11 @@ func TestNewConfig_InvalidInput(t *testing.T) {
 			wantMsg: "token_per_interval must be greater than zero",
 		},
 		{
+			name:    "name must not contain the delimiter",
+			input:   "name: a#b\ntable_name: t\ntoken_per_interval: 10\nbucket_size: 20\n",
+			wantMsg: "name must not contain",
+		},
+		{
 			name:    "missing table_name",
 			input:   "token_per_interval: 10\nbucket_size: 20\n",
 			wantMsg: "table_name must not be empty",
