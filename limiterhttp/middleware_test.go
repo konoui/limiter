@@ -111,9 +111,9 @@ func TestMiddleware(t *testing.T) {
 			wantErrCalled: true,
 		},
 		{
-			name:          "dynamodb throttling is 503, not 429",
+			name:          "dynamodb throttling is 429 with retry-after 1s",
 			err:           limiter.ErrStoreThrottled,
-			wantStatus:    http.StatusServiceUnavailable,
+			wantStatus:    http.StatusTooManyRequests,
 			wantRetry:     "1",
 			wantErrCalled: true,
 		},
@@ -207,7 +207,7 @@ func TestPrepareHandler(t *testing.T) {
 		err  error
 		want int
 	}{
-		{err: limiter.ErrStoreThrottled, want: http.StatusServiceUnavailable},
+		{err: limiter.ErrStoreThrottled, want: http.StatusTooManyRequests},
 		{err: errors.New("boom"), want: http.StatusInternalServerError},
 	} {
 		t.Run(tt.err.Error(), func(t *testing.T) {

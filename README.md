@@ -45,7 +45,8 @@ d, err := rl.Allow(ctx, apiKey)
 // errors: limiter.ErrInvalidBucketID, limiter.ErrStoreThrottled (DynamoDB capacity), limiter.ErrInternal
 ```
 
-net/http middleware (sets `Retry-After` and `X-RateLimit-Remaining`, maps DynamoDB throttling to 503):
+net/http middleware (responds 429 with `Retry-After` for both the rate limit and DynamoDB throttling,
+which is counted separately by the `limiter.dynamodb.throttles` metric; sets `X-RateLimit-Remaining`):
 
 ```go
 mw := limiterhttp.Middleware(rl, limiterhttp.HeaderKey("x-api-key"), // or limiterhttp.RemoteIP

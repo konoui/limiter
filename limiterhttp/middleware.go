@@ -98,8 +98,9 @@ func StatusCode(d limiter.Decision, err error) int {
 		// fail-open
 		return http.StatusOK
 	case errors.Is(err, limiter.ErrStoreThrottled):
-		// server side capacity problem, not the client's rate limit
-		return http.StatusServiceUnavailable
+		// DynamoDB throttling is mostly caused by the traffic of the key itself (a hot partition key).
+		// It is counted separately by the limiter.dynamodb.throttles metric.
+		return http.StatusTooManyRequests
 	case err != nil:
 		return http.StatusInternalServerError
 	case !d.Allowed:
@@ -182,12 +183,15 @@ func setHeaders(w http.ResponseWriter, res *Result) {
 	if res.Err == nil {
 		w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(res.Decision.Remaining, 10))
 	}
-	switch res.Status {
-	case http.StatusTooManyRequests:
-		w.Header().Set("Retry-After", retryAfterSeconds(res.Decision.RetryAfter))
-	case http.StatusServiceUnavailable:
-		w.Header().Set("Retry-After", "1")
+	if res.Status != http.StatusTooManyRequests {
+		return
 	}
+	if errors.Is(res.Err, limiter.ErrStoreThrottled) {
+		// no RetryAfter from the limiter; DynamoDB throttling usually clears within a second
+		w.Header().Set("Retry-After", "1")
+		return
+	}
+	w.Header().Set("Retry-After", retryAfterSeconds(res.Decision.RetryAfter))
 }
 
 // Retry-After takes whole seconds. Round up so that a client does not retry too early.
@@ -213,7 +217,7 @@ func PrepareHandler(p limiter.Preparer, newKey func() (string, error), opts ...O
 			o.onError(r, err)
 			status := http.StatusInternalServerError
 			if errors.Is(err, limiter.ErrStoreThrottled) {
-				status = http.StatusServiceUnavailable
+				status = http.StatusTooManyRequests
 				w.Header().Set("Retry-After", "1")
 			}
 			http.Error(w, http.StatusText(status), status)
