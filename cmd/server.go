@@ -10,7 +10,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
 	"github.com/konoui/limiter"
-	"github.com/konoui/limiter/handlerfunc"
+	"github.com/konoui/limiter/limiterhttp"
 )
 
 // testHandler serves an example API.
@@ -30,7 +30,7 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 		return nil, fmt.Errorf("\"anon\" is not defined in the config")
 	}
 
-	onError := handlerfunc.WithErrorHandler(func(r *http.Request, err error) {
+	onError := limiterhttp.WithErrorHandler(func(r *http.Request, err error) {
 		logger.WarnContext(r.Context(), "limiter error", slog.String("path", r.URL.Path), slog.String("error", err.Error()))
 	})
 	ok200 := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -39,8 +39,8 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle("/anon", handlerfunc.Middleware(arl, remoteIP, onError)(ok200))
-	mux.Handle("/", handlerfunc.Middleware(drl, apiKey, onError)(ok200))
+	mux.Handle("/anon", limiterhttp.Middleware(arl, remoteIP, onError)(ok200))
+	mux.Handle("/", limiterhttp.Middleware(drl, apiKey, onError)(ok200))
 	return mux, nil
 }
 

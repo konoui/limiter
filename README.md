@@ -48,7 +48,7 @@ d, err := rl.Allow(ctx, apiKey)
 net/http middleware (sets `Retry-After` and `X-RateLimit-Remaining`, maps DynamoDB throttling to 503):
 
 ```go
-h := handlerfunc.Middleware(rl, keyFunc)(next)
+h := limiterhttp.Middleware(rl, keyFunc)(next)
 ```
 
 #### Config

@@ -1,4 +1,4 @@
-package handlerfunc_test
+package limiterhttp_test
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/konoui/limiter"
-	"github.com/konoui/limiter/handlerfunc"
+	"github.com/konoui/limiter/limiterhttp"
 	mock "github.com/konoui/limiter/mock_limiter"
 	"go.uber.org/mock/gomock"
 )
@@ -95,14 +95,14 @@ func TestMiddleware(t *testing.T) {
 			nextCalled, errCalled := false, false
 			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				nextCalled = true
-				res, ok := handlerfunc.FromContext(r.Context())
+				res, ok := limiterhttp.FromContext(r.Context())
 				if !ok || res.Key != "dummy" {
 					t.Errorf("result should be in the context: %+v", res)
 				}
 				w.WriteHeader(http.StatusOK)
 			})
-			h := handlerfunc.Middleware(l, headerKeyFunc,
-				handlerfunc.WithErrorHandler(func(*http.Request, error) { errCalled = true }))(next)
+			h := limiterhttp.Middleware(l, headerKeyFunc,
+				limiterhttp.WithErrorHandler(func(*http.Request, error) { errCalled = true }))(next)
 
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			if !tt.noKey {
@@ -137,7 +137,7 @@ func TestPrepareHandler(t *testing.T) {
 		p := mock.NewMockPreparer(gomock.NewController(t))
 		p.EXPECT().PrepareTokens(gomock.Any(), "new-token").Return(nil)
 		rec := httptest.NewRecorder()
-		handlerfunc.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/create", nil))
+		limiterhttp.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/create", nil))
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("want 201, got %d", rec.Code)
 		}
@@ -150,7 +150,7 @@ func TestPrepareHandler(t *testing.T) {
 	t.Run("method not allowed", func(t *testing.T) {
 		p := mock.NewMockPreparer(gomock.NewController(t))
 		rec := httptest.NewRecorder()
-		handlerfunc.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/create", nil))
+		limiterhttp.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/create", nil))
 		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != http.MethodPost {
 			t.Errorf("want 405 with Allow header, got %d %q", rec.Code, rec.Header().Get("Allow"))
 		}
@@ -167,7 +167,7 @@ func TestPrepareHandler(t *testing.T) {
 			p := mock.NewMockPreparer(gomock.NewController(t))
 			p.EXPECT().PrepareTokens(gomock.Any(), gomock.Any()).Return(tt.err)
 			rec := httptest.NewRecorder()
-			handlerfunc.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/create", nil))
+			limiterhttp.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/create", nil))
 			if rec.Code != tt.want {
 				t.Errorf("want %d, got %d", tt.want, rec.Code)
 			}

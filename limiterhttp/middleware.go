@@ -1,5 +1,5 @@
-// Package handlerfunc provides net/http middleware for the limiter.
-package handlerfunc
+// Package limiterhttp provides net/http middleware for the limiter.
+package limiterhttp
 
 import (
 	"context"
