@@ -35,11 +35,6 @@ Resources:
       Architectures:
         - arm64
       Events:
-        create:
-          Type: HttpApi
-          Properties:
-            Path: /create
-            Method: POST
         anon:
           Type: HttpApi
           Properties:

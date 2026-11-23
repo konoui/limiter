@@ -9,16 +9,17 @@ import (
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/awslabs/aws-lambda-go-api-proxy/httpadapter"
-	"github.com/google/uuid"
 	"github.com/konoui/limiter"
 	"github.com/konoui/limiter/handlerfunc"
 )
 
 // testHandler serves an example API.
 //
-//	POST /create  issues an API key for the "default" limiter
-//	GET  /anon    rate limited by client IP address with the "anon" limiter
-//	GET  /*       rate limited by the x-api-key header with the "default" limiter
+//	GET /anon  rate limited by client IP address with the "anon" limiter
+//	GET /*     rate limited by the x-api-key header with the "default" limiter
+//
+// API keys are issued by the create-token command. They are not issued over HTTP
+// because an unauthenticated endpoint would let anyone mint keys and bypass the per-key limit.
 func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 	drl, ok := r["default"]
 	if !ok {
@@ -38,18 +39,9 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle("/create", handlerfunc.PrepareHandler(drl, newToken, onError))
 	mux.Handle("/anon", handlerfunc.Middleware(arl, remoteIP, onError)(ok200))
 	mux.Handle("/", handlerfunc.Middleware(drl, apiKey, onError)(ok200))
 	return mux, nil
-}
-
-func newToken() (string, error) {
-	id, err := uuid.NewRandom()
-	if err != nil {
-		return "", err
-	}
-	return id.String(), nil
 }
 
 func apiKey(r *http.Request) (string, error) {

@@ -93,10 +93,11 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "new token: %s", uid.String())
+			fmt.Fprintf(cmd.OutOrStdout(), "new token: %s\n", uid.String())
 			return nil
-
 		},
+		SilenceUsage:       true,
+		DisableSuggestions: true,
 	}
 	cmd.PersistentFlags().StringVar(&key, "config-name", "", "config name in the config file")
 	cmd.PersistentFlags().StringVar(&fpath, "config-file", "", "config file path")

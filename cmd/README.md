@@ -1,19 +1,24 @@
 ### Example server
 
-```
-limiter create-table --table-name test_table
-limiter start-server --config-file cmd/example-config.yaml
-limiter create-token --config-file cmd/example-config.yaml --config-name default
-```
+| command | purpose |
+|---|---|
+| `limiter` | serve the example API on AWS Lambda with the config baked into the image (`LIMITER_CONFIG_FILEPATH`) |
+| `limiter start-server --config-file <path>` | serve the example API on `:8080` |
+| `limiter create-token --config-file <path> --config-name default` | issue an API key (the only way; keys are not issued over HTTP) |
+| `limiter create-table --table-name <name>` | create a table for local development. On AWS, `template.yaml` creates it |
 
-On AWS Lambda (see `template.yaml`) the config baked into the image (`LIMITER_CONFIG_FILEPATH`) is used.
+With DynamoDB Local, point the SDK to it with the standard environment variable:
+
+```
+export AWS_ENDPOINT_URL_DYNAMODB=http://localhost:8000
+limiter create-table --table-name test_table
+limiter create-token --config-file cmd/example-config.yaml --config-name default
+limiter start-server --config-file cmd/example-config.yaml
+```
 
 ### HTTP API
 
 ```
-$ curl -X POST https://xxxx.execute-api.ap-northeast-1.amazonaws.com/create
-{"token":"aaaaaaaa-aaaa-aaaa-aaaa-c95d780512c7"}
-
 $ curl -i -H "x-api-key: aaaaaaaa-aaaa-aaaa-aaaa-c95d780512c7" https://xxxx.execute-api.ap-northeast-1.amazonaws.com/hello
 HTTP/2 200
 x-ratelimit-remaining: 18
