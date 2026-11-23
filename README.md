@@ -65,12 +65,22 @@ h := mw(next) // the next handler can read limiterhttp.FromContext(r.Context())
 
 #### Config
 
+Only `table_name`, `token_per_interval` and `bucket_size` are required:
+
 ```yaml
 table_name: rate_limit
 token_per_interval: 20
 bucket_size: 40
-interval: 60s
-shards: 0                 # computed when zero
+```
+
+All options with their defaults:
+
+```yaml
+table_name: rate_limit
+token_per_interval: 20
+bucket_size: 40
+interval: 60s             # default 60s
+# shards: 4               # default: computed from the peak requests per second (see Shards)
 additional:
   fail_open: false        # allow requests when DynamoDB fails
   anonymous:              # accept unregistered ids, e.g. IP addresses
