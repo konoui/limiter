@@ -102,10 +102,18 @@ It depends only on the OpenTelemetry API; configure an SDK and exporter in your 
 
 | metric | attributes |
 |---|---|
-| `limiter.decisions` | `limiter.table`, `limiter.result` (allowed / denied / invalid / error), `limiter.source` (dynamodb / cache) |
+| `limiter.decisions` | `limiter.table`, `limiter.result` (allowed / denied / contention / invalid / error), `limiter.source` (dynamodb / cache) |
 | `limiter.dynamodb.throttles` | `limiter.table`, `aws.dynamodb.operation` |
 
+`contention` is a denial because every shard tried was busy with concurrent updates, not over the rate limit.
+
 Bucket ids are never recorded in metrics, and appear in errors and logs only as a hash.
+
+#### Logging
+
+`WithLogger` takes a `*slog.Logger`; logs are discarded by default. The library logs only at debug level
+for troubleshooting. Errors are returned to the caller (log them there, e.g. with `limiterhttp.WithErrorHandler`)
+and counted by metrics, so they are not logged twice.
 
 #### Test
 

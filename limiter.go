@@ -189,25 +189,35 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		return Decision{}, fmt.Errorf("bucket id is longer than %d: %w", l.maxLength, ErrInvalidBucketID)
 	}
 
-	baseLogger := l.logger.With(
-		slog.String("table_name", l.tableName),
-		slog.String("bucket_id", redactID(bucketID)),
-	)
+	// Logs are for troubleshooting only (debug level). Errors are returned and counted by metrics,
+	// so they are not logged here to avoid logging them twice with the caller.
+	debug := l.logger.Enabled(ctx, slog.LevelDebug)
+	baseLogger := l.logger
+	if debug {
+		// skip building attributes (and hashing the id) on the hot path unless debug logs are enabled
+		baseLogger = l.logger.With(
+			slog.String("table_name", l.tableName),
+			slog.String("bucket_id", redactID(bucketID)),
+		)
+	}
 	if source, err := l.checkRegistered(ctx, baseLogger, bucketID); err != nil {
 		err = fmt.Errorf("bucket %s: %w", redactID(bucketID), err)
 		if errors.Is(err, ErrInvalidBucketID) {
 			l.metrics.recordDecision(ctx, resultInvalid, source)
 			return Decision{}, err
 		}
-		baseLogger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
+		baseLogger.DebugContext(ctx, "registration check failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
 		l.metrics.recordDecision(ctx, resultError, source)
 		return Decision{Allowed: l.failOpen}, err
 	}
 	now := timeNow()
-	tries := 0
+	tries, contended := 0, 0
 	var denied Decision // the earliest retry among denied shards
 	for _, shardID := range shardOrder(len(l.gcra.shards)) {
-		logger := baseLogger.With(slog.Int("shard_id", shardID))
+		logger := baseLogger
+		if debug {
+			logger = baseLogger.With(slog.Int("shard_id", shardID))
+		}
 		pk := makePartitionKey(bucketID, shardID)
 		if until, ok := l.dcache.Get(pk); ok {
 			denied = earlier(denied, until.Sub(now))
@@ -219,10 +229,10 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		}
 		tries++
 
-		d, err := l.allow(ctx, logger, bucketID, shardID, now.UnixNano())
+		d, isContended, err := l.allow(ctx, logger, bucketID, shardID, now.UnixNano())
 		if err != nil {
 			err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
-			logger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
+			logger.DebugContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
 			l.metrics.recordDecision(ctx, resultError, sourceDynamoDB)
 			return Decision{Allowed: l.failOpen}, err
 		}
@@ -231,17 +241,25 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 			logger.DebugContext(ctx, "allowed", slog.Int64("remaining", d.Remaining))
 			return d, nil
 		}
+		if isContended {
+			contended++
+		}
 		l.dcache.AddUntil(pk, now.Add(d.RetryAfter))
 		denied = earlier(denied, d.RetryAfter)
-		logger.DebugContext(ctx, "shard denied", slog.Duration("retry_after", d.RetryAfter))
+		logger.DebugContext(ctx, "shard denied", slog.Bool("contended", isContended), slog.Duration("retry_after", d.RetryAfter))
 	}
 
-	source := sourceDynamoDB
-	if tries == 0 {
+	source, result := sourceDynamoDB, resultDenied
+	switch {
+	case tries == 0:
 		source = sourceCache
+	case contended == tries:
+		// every shard tried was busy with concurrent updates, not over the rate limit
+		result = resultContention
 	}
-	l.metrics.recordDecision(ctx, resultDenied, source)
-	baseLogger.DebugContext(ctx, "denied", slog.String("source", source), slog.Duration("retry_after", denied.RetryAfter))
+	l.metrics.recordDecision(ctx, result, source)
+	baseLogger.DebugContext(ctx, "denied", slog.String("source", source), slog.String("result", result),
+		slog.Duration("retry_after", denied.RetryAfter))
 	return denied, nil
 }
 
@@ -264,7 +282,8 @@ const (
 
 // allow runs GCRA with conditional writes. No read is needed:
 // a failed condition returns the current item, which tells the next action.
-func (l *RateLimit) allow(ctx context.Context, logger *slog.Logger, bucketID string, shardID int, now int64) (Decision, error) {
+// contended reports a denial because of too many concurrent updates rather than the rate limit.
+func (l *RateLimit) allow(ctx context.Context, logger *slog.Logger, bucketID string, shardID int, now int64) (_ Decision, contended bool, _ error) {
 	s := l.gcra.shards[shardID]
 	path := pathIdle
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -277,15 +296,15 @@ func (l *RateLimit) allow(ctx context.Context, logger *slog.Logger, bucketID str
 			tat, err = l.writeBusy(ctx, logger, bucketID, shardID, now, s)
 		}
 		if err == nil {
-			return Decision{Allowed: true, Remaining: s.remaining(now, tat)}, nil
+			return Decision{Allowed: true, Remaining: s.remaining(now, tat)}, false, nil
 		}
 
 		var ccf *types.ConditionalCheckFailedException
 		if !errors.As(err, &ccf) {
 			if errors.Is(err, ErrStoreThrottled) {
-				return Decision{}, err
+				return Decision{}, false, err
 			}
-			return Decision{}, fmt.Errorf("%w: %w", ErrInternal, err)
+			return Decision{}, false, fmt.Errorf("%w: %w", ErrInternal, err)
 		}
 
 		if len(ccf.Item) == 0 {
@@ -296,22 +315,22 @@ func (l *RateLimit) allow(ctx context.Context, logger *slog.Logger, bucketID str
 
 		item := new(ddbItem)
 		if err := attributevalue.UnmarshalMap(ccf.Item, item); err != nil {
-			return Decision{}, fmt.Errorf("%w: unmarshal item: %w", ErrInternal, err)
+			return Decision{}, false, fmt.Errorf("%w: unmarshal item: %w", ErrInternal, err)
 		}
 		switch {
 		case item.TAT < now:
 			path = pathIdle
 		case item.TAT > now+int64(s.tolerance):
-			return Decision{Allowed: false, RetryAfter: s.retryAfter(now, item.TAT)}, nil
+			return Decision{Allowed: false, RetryAfter: s.retryAfter(now, item.TAT)}, false, nil
 		default:
 			path = pathBusy
 		}
 		logger.DebugContext(ctx, "condition check failed, retrying", slog.Int("attempt", attempt), slog.Int("next_path", int(path)))
 	}
 
-	// the shard is updated by many concurrent requests. treat it as exhausted.
-	logger.WarnContext(ctx, "too many concurrent updates on the shard")
-	return Decision{Allowed: false, RetryAfter: s.emission}, nil
+	// the shard is updated by many concurrent requests. treat it as exhausted for an emission interval.
+	// it is counted as limiter.result=contention.
+	return Decision{Allowed: false, RetryAfter: s.emission}, true, nil
 }
 
 // writeIdle sets TAT = now + emission when TAT < now, creating the shard item if needed.

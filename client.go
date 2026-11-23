@@ -75,6 +75,10 @@ func (c *wrappedDDBClient) classify(ctx context.Context, operation string, err e
 }
 
 func debugResponse(ctx context.Context, logger *slog.Logger, op string, md smithymiddleware.Metadata, consumed any) {
+	// called for every DynamoDB request; avoid building attributes unless debug logs are enabled
+	if !logger.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
 	requestID, _ := middleware.GetRequestIDMetadata(md)
 	logger.DebugContext(ctx, op+" response",
 		slog.String("ddb_request_id", requestID),
