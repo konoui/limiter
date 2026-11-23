@@ -52,9 +52,9 @@ func cfgToOpts(c *Config) ([]Opt, error) {
 
 	if cfg.Anonymous != nil {
 		ttl := cfg.Anonymous.RecordTTL
-		max := 1 * time.Second
-		if ttl < max {
-			return nil, fmt.Errorf("anonymous.record_ttl is specified but value is less than %v", max)
+		minTTL := 1 * time.Second
+		if ttl < minTTL {
+			return nil, fmt.Errorf("anonymous.record_ttl is specified but value is less than %v", minTTL)
 		}
 		opts = append(opts, withAnonymous(ttl))
 	}

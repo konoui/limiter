@@ -2,72 +2,52 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
-)
-
-var (
-	ddbClient *dynamodb.Client
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 func newDDBClient(ctx context.Context) (*dynamodb.Client, error) {
-	if ddbClient != nil {
-		return ddbClient, nil
-	}
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load aws config: %w", err)
 	}
-	client := dynamodb.NewFromConfig(cfg)
-	return client, nil
+	return dynamodb.NewFromConfig(cfg), nil
 }
 
-func newCWLClient(ctx context.Context) (*cloudwatchlogs.Client, error) {
-	cfg, err := config.LoadDefaultConfig(ctx)
+// setupMetrics exports metrics with OTLP/HTTP when an OTLP endpoint is configured by the standard
+// OTEL_EXPORTER_OTLP_* environment variables (e.g. to the ADOT collector Lambda layer).
+// Otherwise metrics are not exported. It returns a function to flush buffered metrics.
+func setupMetrics(ctx context.Context) (flush func(context.Context) error, err error) {
+	noop := func(context.Context) error { return nil }
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" && os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") == "" {
+		return noop, nil
+	}
+	exporter, err := otlpmetrichttp.New(ctx)
 	if err != nil {
-		return nil, err
+		return noop, fmt.Errorf("create otlp metric exporter: %w", err)
 	}
-	client := cloudwatchlogs.NewFromConfig(cfg)
-	return client, nil
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter)))
+	otel.SetMeterProvider(mp)
+	return mp.ForceFlush, nil
 }
 
-func publishMetric(ctx context.Context, client *cloudwatchlogs.Client, input *cloudwatchlogs.PutLogEventsInput) error {
-	_, err := client.PutLogEvents(ctx, input, func(o *cloudwatchlogs.Options) {
-		o.APIOptions = append(o.APIOptions, smithyhttp.SetHeaderValue("x-amzn-logs-format", "json/emf"))
+// flushAfter flushes metrics after each request.
+// A Lambda execution environment may be frozen before a periodic export runs.
+func flushAfter(flush func(context.Context) error, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Second)
+		defer cancel()
+		if err := flush(ctx); err != nil {
+			logger.WarnContext(ctx, "failed to flush metrics", "error", err.Error())
+		}
 	})
-	return err
-}
-
-func ReadAndPublish(ctx context.Context, in io.Reader, c *cloudwatchlogs.Client, logGroup, stream string) error {
-	d, err := io.ReadAll(in)
-	if err != nil {
-		return err
-	}
-
-	v := map[string]any{}
-	if err := json.Unmarshal(d, &v); err != nil {
-		return fmt.Errorf("invalid json: %w", err)
-	}
-
-	msg := string(d)
-	timestamp := time.Now().UnixMilli()
-	err = publishMetric(ctx, c, &cloudwatchlogs.PutLogEventsInput{
-		LogGroupName:  &logGroup,
-		LogStreamName: &stream,
-		LogEvents: []types.InputLogEvent{
-			{
-				Message:   &msg,
-				Timestamp: &timestamp,
-			},
-		},
-	})
-	return err
 }

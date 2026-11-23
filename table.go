@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,10 +29,6 @@ type ddbItem struct {
 	TTL int64 `dynamodbav:"ttl,omitempty"`
 }
 
-func int64String(v int64) string {
-	return strconv.FormatInt(v, 10)
-}
-
 func buildPartitionKey(bucketID string, shardID int) map[string]types.AttributeValue {
 	return map[string]types.AttributeValue{
 		attrBucketIDShardID: &types.AttributeValueMemberS{
@@ -44,14 +39,6 @@ func buildPartitionKey(bucketID string, shardID int) map[string]types.AttributeV
 
 func makePartitionKey(bucketID string, shardID int) string {
 	return bucketID + delimiter + strconv.Itoa(shardID)
-}
-
-func splitPartitionKey(bucketIDShardID string) (bucketID, shardID string, _ error) {
-	idx := strings.LastIndex(bucketIDShardID, delimiter)
-	if idx <= 0 || idx == len(bucketIDShardID)-1 {
-		return "", "", fmt.Errorf("unexpected partition key: %s", redactID(bucketIDShardID))
-	}
-	return bucketIDShardID[:idx], bucketIDShardID[idx+1:], nil
 }
 
 // CreateTable creates a table for the limiter and enables TTL. It does nothing if the table exists.

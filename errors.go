@@ -30,11 +30,6 @@ func redactID(id string) string {
 	return "sha256:" + hex.EncodeToString(sum[:6])
 }
 
-func isErrConditionalCheckFailed(err error) bool {
-	var e *types.ConditionalCheckFailedException
-	return errors.As(err, &e)
-}
-
 // see https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/transaction-apis.html#transaction-conflict-handling
 func isErrLimitExceeded(err error) bool {
 	// https://github.com/aws/aws-sdk-go-v2/blob/v1.18.0/aws/retry/throttle_error.go#L47

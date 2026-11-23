@@ -18,8 +18,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"go.uber.org/mock/gomock"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.uber.org/mock/gomock"
 )
 
 // 2 tokens per 4 seconds, burst 4: emission 2s, tolerance 6s, single shard
@@ -41,8 +44,7 @@ func fixTime(t *testing.T, d time.Duration) int64 {
 	t.Helper()
 	base := time.Unix(1_000_000, 0)
 	timeNow = func() time.Time { return base.Add(d) }
-	uuidNewRandom = func() (uuid.UUID, error) { return uuid.MustParse("fd8107dc-686b-4c62-95e6-070c490a002f"), nil }
-	t.Cleanup(func() { timeNow = time.Now; uuidNewRandom = uuid.NewRandom })
+	t.Cleanup(func() { timeNow = time.Now })
 	return base.Add(d).UnixNano()
 }
 
@@ -248,8 +250,7 @@ func TestRateLimit_Allow_denyCache(t *testing.T) {
 	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
 		Return(nil, ccf(t, &ddbItem{TAT: now + tolerance + emission}))
 
-	metrics := &bytes.Buffer{}
-	rl, err := New(testConfig(), c, WithEMFMetrics(metrics))
+	rl, err := New(testConfig(), c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,9 +263,6 @@ func TestRateLimit_Allow_denyCache(t *testing.T) {
 	d, err := rl.Allow(ctx, "dummy")
 	if err != nil || d.Allowed || d.RetryAfter != time.Second {
 		t.Fatalf("should be denied by the cache for the rest 1s: %+v %v", d, err)
-	}
-	if n := strings.Count(metrics.String(), "\n"); n != 2 {
-		t.Errorf("a throttle metric should be emitted per denial, got %d", n)
 	}
 
 	// expired: DynamoDB is called again
@@ -343,21 +341,22 @@ func TestRateLimit_PrepareTokens(t *testing.T) {
 		}
 	})
 
-	t.Run("throttling does not panic and emits a metric", func(t *testing.T) {
+	t.Run("throttling does not panic and records a metric", func(t *testing.T) {
 		fixTime(t, 0)
 		c := NewMockDDBClient(gomock.NewController(t))
 		c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).
 			Return(nil, &types.ProvisionedThroughputExceededException{Message: aws.String("throttled")})
-		metrics := &bytes.Buffer{}
-		rl, err := New(testConfig(), c, WithEMFMetrics(metrics))
+		reader, opt := newTestMeter()
+		rl, err := New(testConfig(), c, opt)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := rl.PrepareTokens(context.Background(), "key"); !errors.Is(err, ErrStoreThrottled) {
 			t.Errorf("want %v, got %v", ErrStoreThrottled, err)
 		}
-		if !strings.Contains(metrics.String(), `"Operation":"BatchWriteItem"`) {
-			t.Errorf("throttle metric should be emitted: %s", metrics.String())
+		got := collectCounters(t, reader)["limiter.dynamodb.throttles"]
+		if got["aws.dynamodb.operation=BatchWriteItem,limiter.table=dummy_table"] != 1 {
+			t.Errorf("throttle metric should be recorded: %v", got)
 		}
 	})
 
@@ -391,7 +390,7 @@ func TestRateLimit_PrepareTokens(t *testing.T) {
 
 // Errors must be a single line, keep sentinel errors, and never contain the raw bucket id.
 func TestRateLimit_errorsAndLogsAreRedacted(t *testing.T) {
-	const secret = "sk-secret-api-key"
+	const secret = "sk-secret-api-key" //nolint:gosec // fake key to check redaction
 	for _, upstream := range []error{
 		&types.InternalServerError{Message: aws.String("boom")},
 		&types.ProvisionedThroughputExceededException{Message: aws.String("slow down")},
@@ -400,8 +399,9 @@ func TestRateLimit_errorsAndLogsAreRedacted(t *testing.T) {
 			fixTime(t, 0)
 			c := NewMockDDBClient(gomock.NewController(t))
 			c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, upstream)
-			metrics, logs := &bytes.Buffer{}, &bytes.Buffer{}
-			rl, err := New(testConfig(), c, WithEMFMetrics(metrics),
+			logs := &bytes.Buffer{}
+			reader, meterOpt := newTestMeter()
+			rl, err := New(testConfig(), c, meterOpt,
 				WithLogger(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))))
 			if err != nil {
 				t.Fatal(err)
@@ -413,7 +413,8 @@ func TestRateLimit_errorsAndLogsAreRedacted(t *testing.T) {
 			if strings.Contains(err.Error(), "\n") {
 				t.Errorf("error must be a single line: %q", err.Error())
 			}
-			for name, s := range map[string]string{"error": err.Error(), "metrics": metrics.String(), "logs": logs.String()} {
+			metrics := fmt.Sprint(collectCounters(t, reader))
+			for name, s := range map[string]string{"error": err.Error(), "metrics": metrics, "logs": logs.String()} {
 				if strings.Contains(s, secret) {
 					t.Errorf("%s must not contain the raw bucket id: %s", name, s)
 				}
@@ -425,49 +426,78 @@ func TestRateLimit_errorsAndLogsAreRedacted(t *testing.T) {
 	}
 }
 
-// BucketID must not be a metric dimension (high cardinality) and each EMF record must end with a newline.
-func TestEMFFormat(t *testing.T) {
-	out := &bytes.Buffer{}
-	outputLog(out, buildThrottleMetric("table", "bucket", "0"))
-	outputLog(out, buildDDBThrottleMetric("table", "UpdateItem", "bucket", "0"))
+// newTestMeter returns an option recording metrics into an in-memory reader.
+func newTestMeter() (*sdkmetric.ManualReader, Opt) {
+	reader := sdkmetric.NewManualReader()
+	return reader, WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+}
 
-	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 lines, got %d: %q", len(lines), out.String())
+// collectCounters returns counter values keyed by metric name and encoded attributes ("k=v,k=v").
+func collectCounters(t *testing.T, reader *sdkmetric.ManualReader) map[string]map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
 	}
-	for _, m := range []CloudWatchMetrics{throttleMetrics, ddbThrottleMetrics} {
-		for _, dims := range m.Dimensions {
-			for _, d := range dims {
-				if d == "BucketID" {
-					t.Errorf("BucketID must not be a dimension: %v", dims)
-				}
+	ret := map[string]map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			ret[m.Name] = map[string]int64{}
+			for _, dp := range sum.DataPoints {
+				ret[m.Name][dp.Attributes.Encoded(attribute.DefaultEncoder())] = dp.Value
 			}
 		}
 	}
+	return ret
 }
 
-func Test_splitPartitionKey(t *testing.T) {
-	tests := []struct {
-		input              string
-		wantBucket, wantID string
-		wantErr            bool
-	}{
-		{input: "test#1", wantBucket: "test", wantID: "1"},
-		{input: "test#a#1", wantBucket: "test#a", wantID: "1"},
-		{input: "test#", wantErr: true},
-		{input: "#1", wantErr: true},
-		{input: "test", wantErr: true},
+func TestRateLimit_metrics(t *testing.T) {
+	now := fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	gomock.InOrder(
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil),
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, &ddbItem{TAT: now + tolerance + emission})),
+		c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+			Return(nil, &types.ProvisionedThroughputExceededException{Message: aws.String("slow down")}),
+	)
+	reader, opt := newTestMeter()
+	rl, err := New(testConfig(), c, opt)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			b, s, err := splitPartitionKey(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+	ctx := context.Background()
+	_, _ = rl.Allow(ctx, "a") // allowed
+	_, _ = rl.Allow(ctx, "b") // denied by dynamodb
+	_, _ = rl.Allow(ctx, "b") // denied by the local cache
+	_, _ = rl.Allow(ctx, "c") // dynamodb throttled
+	_, _ = rl.Allow(ctx, "")  // invalid
+
+	got := collectCounters(t, reader)
+	want := map[string]map[string]int64{
+		"limiter.decisions": {
+			"limiter.result=allowed,limiter.source=dynamodb,limiter.table=dummy_table": 1,
+			"limiter.result=denied,limiter.source=dynamodb,limiter.table=dummy_table":  1,
+			"limiter.result=denied,limiter.source=cache,limiter.table=dummy_table":     1,
+			"limiter.result=error,limiter.source=dynamodb,limiter.table=dummy_table":   1,
+			"limiter.result=invalid,limiter.source=cache,limiter.table=dummy_table":    1,
+		},
+		"limiter.dynamodb.throttles": {
+			"aws.dynamodb.operation=UpdateItem,limiter.table=dummy_table": 1,
+		},
+	}
+	for name, points := range want {
+		for attrs, v := range points {
+			if got[name][attrs] != v {
+				t.Errorf("%s{%s}: want %d, got %d (all: %v)", name, attrs, v, got[name][attrs], got[name])
 			}
-			if b != tt.wantBucket || s != tt.wantID {
-				t.Errorf("got %q %q", b, s)
-			}
-		})
+		}
+		if len(got[name]) != len(points) {
+			t.Errorf("%s: unexpected data points %v", name, got[name])
+		}
 	}
 }
 
@@ -476,7 +506,7 @@ func Test_splitPartitionKey(t *testing.T) {
 func testClient(t *testing.T) *dynamodb.Client {
 	t.Helper()
 	t.Setenv("AWS_ACCESS_KEY_ID", "123456")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "123456")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "123456") //nolint:gosec // dummy credentials for DynamoDB Local
 	t.Setenv("AWS_DEFAULT_REGION", "us-east-1")
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {

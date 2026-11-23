@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+
 	"log/slog"
 	"math/rand/v2"
 	"time"
@@ -14,14 +14,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/metric"
 )
 
 var (
 	// for tests
-	timeNow       = time.Now
-	uuidNewRandom = uuid.NewRandom
-	pickShard     = func(n int) int { return rand.IntN(n) } //nolint:gosec // not for security
+	timeNow   = time.Now
+	pickShard = rand.IntN //nolint:gosec // shard selection is not security sensitive
 
 	_ LimitPreparer = &RateLimit{}
 )
@@ -74,16 +73,23 @@ type RateLimit struct {
 	dcache    *expiringCache
 	maxLength int
 	logger    *slog.Logger
+	// meterProvider is the global MeterProvider unless WithMeterProvider is given
+	meterProvider metric.MeterProvider
+	metrics       *metrics
 }
 
+// Opt configures RateLimit.
 type Opt func(rl *RateLimit)
 
-func WithEMFMetrics(w io.Writer) Opt {
+// WithMeterProvider sets the OpenTelemetry MeterProvider. The global MeterProvider is used by default,
+// which is a no-op until an OpenTelemetry SDK is configured.
+func WithMeterProvider(mp metric.MeterProvider) Opt {
 	return func(rl *RateLimit) {
-		rl.client = newWrapDDBClient(rl.client.c, w)
+		rl.meterProvider = mp
 	}
 }
 
+// WithLogger sets a logger. Logs are discarded by default.
 func WithLogger(logger *slog.Logger) Opt {
 	return func(rl *RateLimit) {
 		rl.logger = logger
@@ -111,6 +117,7 @@ func withNegativeCache(size int, ttl time.Duration) Opt {
 	}
 }
 
+// New returns a RateLimit for cfg. client is usually a *dynamodb.Client.
 func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -132,7 +139,6 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 	l := &RateLimit{
 		gcra:      g,
 		tableName: cfg.TableName,
-		client:    newWrapDDBClient(client, io.Discard),
 		ncache:    newExpiringCache(defaultNegativeCacheSize),
 		ncacheTTL: defaultNegativeCacheTTL,
 		dcache:    newExpiringCache(defaultDenyCacheSize),
@@ -144,18 +150,28 @@ func New(cfg *Config, client DDBClient, opts ...Opt) (*RateLimit, error) {
 			opt(l)
 		}
 	}
+
+	m, err := newMetrics(l.meterProvider, l.tableName)
+	if err != nil {
+		return nil, err
+	}
+	l.metrics = m
+	l.client = &wrappedDDBClient{c: client, metrics: m}
 	return l, nil
 }
 
 // Allow consumes a token of a randomly selected shard of the bucket.
 func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error) {
 	if bucketID == "" {
+		l.metrics.recordDecision(ctx, resultInvalid, sourceCache)
 		return Decision{}, fmt.Errorf("empty bucket id: %w", ErrInvalidBucketID)
 	}
 	if len(bucketID) > l.maxLength {
+		l.metrics.recordDecision(ctx, resultInvalid, sourceCache)
 		return Decision{}, fmt.Errorf("bucket id is longer than %d: %w", l.maxLength, ErrInvalidBucketID)
 	}
 	if l.ncache.Contains(bucketID) {
+		l.metrics.recordDecision(ctx, resultInvalid, sourceCache)
 		return Decision{}, fmt.Errorf("bucket %s: unregistered bucket id (cached): %w", redactID(bucketID), ErrInvalidBucketID)
 	}
 
@@ -171,7 +187,7 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 	if until, ok := l.dcache.Get(pk); ok {
 		d := Decision{Allowed: false, RetryAfter: until.Sub(now)}
 		logger.DebugContext(ctx, "denied by the local cache", slog.Duration("retry_after", d.RetryAfter))
-		l.emitThrottle(bucketID, shardID)
+		l.metrics.recordDecision(ctx, resultDenied, sourceCache)
 		return d, nil
 	}
 
@@ -180,25 +196,25 @@ func (l *RateLimit) Allow(ctx context.Context, bucketID string) (Decision, error
 		err = fmt.Errorf("bucket %s, shard %d: %w", redactID(bucketID), shardID, err)
 		if errors.Is(err, ErrInvalidBucketID) {
 			l.ncache.AddUntil(bucketID, now.Add(l.ncacheTTL))
+			l.metrics.recordDecision(ctx, resultInvalid, sourceDynamoDB)
 			return Decision{}, err
 		}
 		logger.WarnContext(ctx, "dynamodb failed", slog.String("error", err.Error()), slog.Bool("fail_open", l.failOpen))
+		l.metrics.recordDecision(ctx, resultError, sourceDynamoDB)
 		return Decision{Allowed: l.failOpen}, err
 	}
 
+	result := resultAllowed
 	if !d.Allowed {
 		l.dcache.AddUntil(pk, now.Add(d.RetryAfter))
-		l.emitThrottle(bucketID, shardID)
+		result = resultDenied
 	}
+	l.metrics.recordDecision(ctx, result, sourceDynamoDB)
 	logger.DebugContext(ctx, "result",
 		slog.Bool("allowed", d.Allowed),
 		slog.Int64("remaining", d.Remaining),
 		slog.Duration("retry_after", d.RetryAfter))
 	return d, nil
-}
-
-func (l *RateLimit) emitThrottle(bucketID string, shardID int) {
-	outputLog(l.client.metricOut, buildThrottleMetric(l.tableName, redactID(bucketID), int64String(int64(shardID))))
 }
 
 type writePath int
