@@ -1,243 +1,178 @@
 package handlerfunc_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
-	"github.com/golang/mock/gomock"
-	"github.com/google/uuid"
 	"github.com/konoui/limiter"
 	"github.com/konoui/limiter/handlerfunc"
 	mock "github.com/konoui/limiter/mock_limiter"
+	"go.uber.org/mock/gomock"
 )
 
-func MiddlewareLimiter(rl limiter.LimitPreparer, headerKey string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		getKey := func(r *http.Request) (string, error) {
-			v := r.Header.Get(headerKey)
-			if v == "" {
-				return "", fmt.Errorf("%s header has no value", headerKey)
-			}
-			return v, nil
-		}
-		h := handlerfunc.NewHandler(rl, getKey)
-		h.ServeHTTP(w, r)
-		next.ServeHTTP(w, r)
-	})
+const headerKey = "x-api-key"
+
+func headerKeyFunc(r *http.Request) (string, error) {
+	v := r.Header.Get(headerKey)
+	if v == "" {
+		return "", fmt.Errorf("%s header has no value", headerKey)
+	}
+	return v, nil
 }
 
-func MiddlewarePrepare(rl limiter.LimitPreparer, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		generator := func() (string, error) {
-			id, err := uuid.NewRandom()
-			if err != nil {
-				return "", err
-			}
-			return id.String(), nil
-		}
-		h := handlerfunc.NewPrepareTokenHandler(rl, generator)
-		h.ServeHTTP(w, r)
-		next.ServeHTTP(w, r)
-	})
-}
-
-const headerKey = "authentication"
-
-func Test_Handler(t *testing.T) {
+func TestMiddleware(t *testing.T) {
 	tests := []struct {
-		name   string
-		mocker func(rl *mock.MockLimitPreparer)
-		req    func() *http.Request
-		status int
-		msg    string
+		name          string
+		noKey         bool
+		decision      limiter.Decision
+		err           error
+		wantStatus    int
+		wantNext      bool
+		wantRetry     string
+		wantRemaining string
+		wantErrCalled bool
 	}{
 		{
-			name: "200 and ok msg",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					ShouldThrottle(gomock.Any(), gomock.Any()).
-					Return(false, nil)
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.Header.Add(headerKey, "dummy")
-				return req
-			},
-			status: http.StatusOK,
-			msg:    "ok",
+			name:          "allowed",
+			decision:      limiter.Decision{Allowed: true, Remaining: 3},
+			wantStatus:    http.StatusOK,
+			wantNext:      true,
+			wantRemaining: "3",
 		},
 		{
-			name:   "400 when header key is empty",
-			mocker: func(rl *mock.MockLimitPreparer) {},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				return req
-			},
-			status: http.StatusBadRequest,
-			msg:    fmt.Sprintf("%s header has no value", headerKey),
+			name:          "denied with retry-after rounded up",
+			decision:      limiter.Decision{Allowed: false, RetryAfter: 1500 * time.Millisecond},
+			wantStatus:    http.StatusTooManyRequests,
+			wantRetry:     "2",
+			wantRemaining: "0",
 		},
 		{
-			name: "429 and throttle msg",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					ShouldThrottle(gomock.Any(), gomock.Any()).
-					Return(true, nil)
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.Header.Add(headerKey, "dummy")
-				return req
-			},
-			status: http.StatusTooManyRequests,
-			msg:    "throttle",
+			name:          "missing key",
+			noKey:         true,
+			wantStatus:    http.StatusBadRequest,
+			wantErrCalled: true,
 		},
 		{
-			name: "429 when dynamodb api return rate limit error",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					ShouldThrottle(gomock.Any(), gomock.Any()).
-					Return(true, limiter.ErrRateLimitExceeded)
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.Header.Add(headerKey, "dummy")
-				return req
-			},
-			status: http.StatusTooManyRequests,
-			msg:    limiter.ErrRateLimitExceeded.Error(),
+			name:          "invalid bucket id",
+			err:           limiter.ErrInvalidBucketID,
+			wantStatus:    http.StatusBadRequest,
+			wantErrCalled: true,
 		},
 		{
-			name: "200 when dynamodb api return rate limit error",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					ShouldThrottle(gomock.Any(), gomock.Any()).
-					Return(false, limiter.ErrRateLimitExceeded)
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.Header.Add(headerKey, "dummy")
-				return req
-			},
-			status: http.StatusOK,
-			msg:    limiter.ErrRateLimitExceeded.Error(),
+			name:          "dynamodb throttling is 503, not 429",
+			err:           limiter.ErrStoreThrottled,
+			wantStatus:    http.StatusServiceUnavailable,
+			wantRetry:     "1",
+			wantErrCalled: true,
 		},
 		{
-			name: "internal server error",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					ShouldThrottle(gomock.Any(), gomock.Any()).
-					Return(true, errors.New("error"))
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/", nil)
-				req.Header.Add(headerKey, "dummy")
-				return req
-			},
-			status: http.StatusInternalServerError,
-			msg:    "error",
+			name:          "fail-open passes the request and reports the error",
+			decision:      limiter.Decision{Allowed: true},
+			err:           limiter.ErrStoreThrottled,
+			wantStatus:    http.StatusOK,
+			wantNext:      true,
+			wantErrCalled: true,
 		},
 		{
-			name: "create token",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					PrepareTokens(gomock.Any(), gomock.Any()).
-					Return(nil)
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodPost, "/create", nil)
-				return req
-			},
-			status: http.StatusOK,
-			msg:    "created",
-		},
-		{
-			name: "create token error",
-			mocker: func(rl *mock.MockLimitPreparer) {
-				rl.EXPECT().
-					PrepareTokens(gomock.Any(), gomock.Any()).
-					Return(errors.New("error"))
-			},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodPost, "/create", nil)
-				return req
-			},
-			status: http.StatusInternalServerError,
-			msg:    "error",
-		},
-		{
-			name:   "invalid method",
-			mocker: func(rl *mock.MockLimitPreparer) {},
-			req: func() *http.Request {
-				req := httptest.NewRequest(http.MethodGet, "/create", nil)
-				return req
-			},
-			status: http.StatusBadRequest,
-			msg:    "invalid method: GET",
+			name:          "internal error",
+			err:           limiter.ErrInternal,
+			wantStatus:    http.StatusInternalServerError,
+			wantErrCalled: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			rl := mock.NewMockLimitPreparer(ctrl)
-			tt.mocker(rl)
-
-			mux := http.NewServeMux()
-			mux.Handle("/", MiddlewareLimiter(rl, headerKey, http.HandlerFunc(
-				func(w http.ResponseWriter, r *http.Request) {
-					c, ok := handlerfunc.FromContext(r.Context())
-					if !ok {
-						w.WriteHeader(http.StatusBadRequest)
-						fmt.Fprintf(w, "internal server error")
-						return
-					}
-
-					if c.Err != nil {
-						w.WriteHeader(c.Status)
-						fmt.Fprint(w, c.Err.Error())
-						return
-					}
-
-					if c.Throttle {
-						w.WriteHeader(c.Status)
-						fmt.Fprintf(w, "throttle")
-						return
-					}
-
-					w.WriteHeader(c.Status)
-					fmt.Fprintf(w, "ok")
-				},
-			)))
-
-			mux.Handle("/create", MiddlewarePrepare(rl,
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					c, ok := handlerfunc.FromContext(r.Context())
-					if !ok {
-						w.WriteHeader(http.StatusBadRequest)
-						fmt.Fprintf(w, "internal server error")
-						return
-					}
-					if c.Err != nil {
-						w.WriteHeader(c.Status)
-						fmt.Fprint(w, c.Err.Error())
-						return
-					}
-
-					w.WriteHeader(c.Status)
-					fmt.Fprintf(w, "created")
-				})))
-
-			req := tt.req()
-			got := httptest.NewRecorder()
-			mux.ServeHTTP(got, req)
-			if got.Code != tt.status {
-				t.Errorf("want: %d, got: %d", tt.status, got.Code)
+			l := mock.NewMockLimiter(gomock.NewController(t))
+			if !tt.noKey {
+				l.EXPECT().Allow(gomock.Any(), "dummy").Return(tt.decision, tt.err)
 			}
-			if got := got.Body.String(); got != tt.msg {
-				t.Errorf("want: %s, got: %s", tt.msg, got)
+
+			nextCalled, errCalled := false, false
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				nextCalled = true
+				res, ok := handlerfunc.FromContext(r.Context())
+				if !ok || res.Key != "dummy" {
+					t.Errorf("result should be in the context: %+v", res)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			h := handlerfunc.Middleware(l, headerKeyFunc,
+				handlerfunc.WithErrorHandler(func(*http.Request, error) { errCalled = true }))(next)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			if !tt.noKey {
+				req.Header.Set(headerKey, "dummy")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status: want %d, got %d", tt.wantStatus, rec.Code)
+			}
+			if nextCalled != tt.wantNext {
+				t.Errorf("next called: want %v, got %v", tt.wantNext, nextCalled)
+			}
+			if errCalled != tt.wantErrCalled {
+				t.Errorf("error handler called: want %v, got %v", tt.wantErrCalled, errCalled)
+			}
+			if got := rec.Header().Get("Retry-After"); got != tt.wantRetry {
+				t.Errorf("Retry-After: want %q, got %q", tt.wantRetry, got)
+			}
+			if got := rec.Header().Get("X-RateLimit-Remaining"); got != tt.wantRemaining {
+				t.Errorf("X-RateLimit-Remaining: want %q, got %q", tt.wantRemaining, got)
+			}
+		})
+	}
+}
+
+func TestPrepareHandler(t *testing.T) {
+	newKey := func() (string, error) { return "new-token", nil }
+
+	t.Run("issues a token", func(t *testing.T) {
+		p := mock.NewMockPreparer(gomock.NewController(t))
+		p.EXPECT().PrepareTokens(gomock.Any(), "new-token").Return(nil)
+		rec := httptest.NewRecorder()
+		handlerfunc.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/create", nil))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("want 201, got %d", rec.Code)
+		}
+		body := map[string]string{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["token"] != "new-token" {
+			t.Errorf("unexpected body %q: %v", rec.Body.String(), err)
+		}
+	})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		p := mock.NewMockPreparer(gomock.NewController(t))
+		rec := httptest.NewRecorder()
+		handlerfunc.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/create", nil))
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != http.MethodPost {
+			t.Errorf("want 405 with Allow header, got %d %q", rec.Code, rec.Header().Get("Allow"))
+		}
+	})
+
+	for _, tt := range []struct {
+		err  error
+		want int
+	}{
+		{err: limiter.ErrStoreThrottled, want: http.StatusServiceUnavailable},
+		{err: errors.New("boom"), want: http.StatusInternalServerError},
+	} {
+		t.Run(tt.err.Error(), func(t *testing.T) {
+			p := mock.NewMockPreparer(gomock.NewController(t))
+			p.EXPECT().PrepareTokens(gomock.Any(), gomock.Any()).Return(tt.err)
+			rec := httptest.NewRecorder()
+			handlerfunc.PrepareHandler(p, newKey).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/create", nil))
+			if rec.Code != tt.want {
+				t.Errorf("want %d, got %d", tt.want, rec.Code)
+			}
+			if rec.Body.String() == tt.err.Error()+"\n" {
+				t.Error("error details must not be exposed")
 			}
 		})
 	}

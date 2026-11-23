@@ -14,10 +14,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-//go:generate mockgen -source=$GOFILE -destination=mock_$GOPACKAGE/$GOFILE -package=mock_$GOPACKAGE
+//go:generate go tool mockgen -source=$GOFILE -destination=mock_ddb_client_test.go -package=$GOPACKAGE
 type DDBClient interface {
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
-	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 }
 
@@ -35,7 +34,7 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
 	params ...func(*dynamodb.Options)) (_ *dynamodb.UpdateItemOutput, err error) {
 	defer func() {
 		if isErrLimitExceeded(err) {
-			err = fmt.Errorf("%w: %w", ErrRateLimitExceeded, err)
+			err = fmt.Errorf("%w: %w", ErrStoreThrottled, err)
 			bid, sid, lerr := getKeys(input.Key)
 			if lerr != nil {
 				// failing to build metrics must not change the API error
@@ -56,38 +55,13 @@ func (c *wrappedDDBClient) UpdateItem(ctx context.Context, logger *slog.Logger,
 	return resp, err
 }
 
-func (c *wrappedDDBClient) GetItem(ctx context.Context, logger *slog.Logger,
-	input *dynamodb.GetItemInput,
-	params ...func(*dynamodb.Options)) (out *dynamodb.GetItemOutput, err error) {
-	defer func() {
-		if isErrLimitExceeded(err) {
-			err = fmt.Errorf("%w: %w", ErrRateLimitExceeded, err)
-			bid, sid, lerr := getKeys(input.Key)
-			if lerr != nil {
-				// failing to build metrics must not change the API error
-				return
-			}
-			outputLog(c.metricOut, buildDDBThrottleMetric(*input.TableName, "GetItem", bid, sid))
-		}
-	}()
-
-	resp, err := c.c.GetItem(ctx, input, params...)
-	if resp == nil {
-		return resp, err
-	}
-
-	requestID, _ := middleware.GetRequestIDMetadata(resp.ResultMetadata)
-	logger = logger.With(slog.String("ddb_request_id", requestID))
-	logger.DebugContext(ctx, "get-item response", slog.Any("consumed_capacity", resp.ConsumedCapacity))
-	return resp, err
-}
 
 func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context, logger *slog.Logger,
 	input *dynamodb.BatchWriteItemInput,
 	params ...func(*dynamodb.Options)) (out *dynamodb.BatchWriteItemOutput, err error) {
 	defer func() {
 		if isErrLimitExceeded(err) {
-			err = fmt.Errorf("%w: %w", ErrRateLimitExceeded, err)
+			err = fmt.Errorf("%w: %w", ErrStoreThrottled, err)
 			// out is nil when an error is returned. the whole input was throttled.
 			for tableName, v := range input.RequestItems {
 				for _, attr := range v {

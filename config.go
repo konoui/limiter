@@ -20,6 +20,8 @@ type Config struct {
 type AdditionalConfig struct {
 	NegativeCache *NegativeCacheConfig `json:"negative_cache,omitempty"`
 	Anonymous     *AnonymousConfig     `json:"anonymous,omitempty"`
+	// FailOpen allows requests when DynamoDB fails. Requests are denied by default (fail-closed).
+	FailOpen bool `json:"fail_open,omitempty"`
 }
 
 // NegativeCacheConfig configures negative cache for invalid bucket ids.
@@ -36,11 +38,16 @@ type AnonymousConfig struct {
 	RecordTTL time.Duration `json:"record_ttl"`
 }
 
-func cfgToOpts(cfg *AdditionalConfig) ([]Opt, error) {
+func cfgToOpts(c *Config) ([]Opt, error) {
 	opts := make([]Opt, 0, 3)
 
+	cfg := c.AdditionalConfig
 	if cfg == nil {
 		return opts, nil
+	}
+
+	if cfg.FailOpen {
+		opts = append(opts, WithFailOpen())
 	}
 
 	if cfg.Anonymous != nil {
@@ -95,10 +102,10 @@ func (cfg *Config) validate() error {
 	if interval == 0 {
 		interval = DefaultInterval
 	}
-	if _, err := newTokenBucket(cfg.TokenPerInterval, cfg.BucketSize, interval); err != nil {
+	if _, err := newGCRA(cfg.TokenPerInterval, cfg.BucketSize, interval); err != nil {
 		return err
 	}
-	if _, err := cfgToOpts(cfg.AdditionalConfig); err != nil {
+	if _, err := cfgToOpts(cfg); err != nil {
 		return err
 	}
 	return nil

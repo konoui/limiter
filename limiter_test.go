@@ -5,643 +5,607 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	"github.com/google/uuid"
-	mock "github.com/konoui/limiter/mock_limiter"
 )
 
-var logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+// 2 tokens per 4 seconds, burst 4: emission 2s, tolerance 6s, single shard
+func testConfig() *Config {
+	return &Config{
+		TableName:        "dummy_table",
+		TokenPerInterval: 2,
+		BucketSize:       4,
+		Interval:         4 * time.Second,
+	}
+}
 
-// UPDATE_GOLDEN=1 go test ./... regenerates golden files under testdata
-var updateGolden = os.Getenv("UPDATE_GOLDEN") != ""
+var (
+	emission  = int64(2 * time.Second)
+	tolerance = int64(6 * time.Second)
+)
 
-func testClient(t *testing.T) *dynamodb.Client {
+func fixTime(t *testing.T, d time.Duration) int64 {
 	t.Helper()
-	t.Setenv("AWS_ACCESS_KEY_ID", "123456")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "123456")
-	t.Setenv("AWS_DEFAULT_REGION", "us-east-1")
-	ep := aws.Endpoint{
-		PartitionID:       "aws",
-		URL:               "http://localhost:8000",
-		HostnameImmutable: true,
-	}
-	optFunc := aws.EndpointResolverWithOptionsFunc(
-		func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-			if service == dynamodb.ServiceID {
-				return ep, nil
-			}
-			return aws.Endpoint{}, &aws.EndpointNotFoundError{}
-		})
-	opt := config.WithEndpointResolverWithOptions(optFunc)
-	cfg, err := config.LoadDefaultConfig(context.Background(), opt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := dynamodb.NewFromConfig(cfg)
-	return client
+	base := time.Unix(1_000_000, 0)
+	timeNow = func() time.Time { return base.Add(d) }
+	uuidNewRandom = func() (uuid.UUID, error) { return uuid.MustParse("fd8107dc-686b-4c62-95e6-070c490a002f"), nil }
+	t.Cleanup(func() { timeNow = time.Now; uuidNewRandom = uuid.NewRandom })
+	return base.Add(d).UnixNano()
 }
 
-func testRateLimit(t *testing.T, cfg *Config, opts ...Opt) *RateLimit {
+func newAttr(t *testing.T, item *ddbItem) map[string]types.AttributeValue {
 	t.Helper()
-	client := testClient(t)
-	cfg.TableName = "test_buckets_table"
-	l, err := New(
-		cfg,
-		client,
-		opts...,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := CreateTable(context.Background(), cfg.TableName, client); err != nil {
-		t.Fatal(err)
-	}
-	return l
-}
-
-func myUUIDNewRandom(t *testing.T) func() (uuid.UUID, error) {
-	return func() (uuid.UUID, error) {
-		id, err := uuid.Parse("fd8107dc-686b-4c62-95e6-070c490a002f")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return id, nil
-	}
-}
-
-func myNow(add time.Duration) func() time.Time {
-	return func() time.Time {
-		return time.UnixMilli(1000000000 + add.Milliseconds())
-	}
-}
-
-func newAttr(t *testing.T, ddbItem *ddbItem) map[string]types.AttributeValue {
-	attr, err := attributevalue.MarshalMap(ddbItem)
+	attr, err := attributevalue.MarshalMap(item)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return attr
 }
 
-func TestRateLimit_ShouldThrottleMock(t *testing.T) {
-	cfg := Config{
-		TokenPerInterval: 2,
-		BucketSize:       2 * 2,
-		Interval:         3 * time.Second,
-		TableName:        "dummy_table",
-		AdditionalConfig: &AdditionalConfig{
-			NegativeCache: &NegativeCacheConfig{
-				Size: 0,
-			},
-		},
+func ccf(t *testing.T, item *ddbItem) error {
+	t.Helper()
+	e := &types.ConditionalCheckFailedException{Message: aws.String("ccf")}
+	if item != nil {
+		e.Item = newAttr(t, item)
 	}
+	return e
+}
+
+func names(in *dynamodb.UpdateItemInput) string {
+	ret := []string{}
+	for _, v := range in.ExpressionAttributeNames {
+		ret = append(ret, v)
+	}
+	return strings.Join(ret, ",")
+}
+
+// idle path input
+func isIdle(in *dynamodb.UpdateItemInput) bool {
+	return !strings.Contains(*in.ConditionExpression, "BETWEEN")
+}
+
+func TestRateLimit_Allow(t *testing.T) {
 	tests := []struct {
-		name       string
-		mocker     func(client *mock.MockDDBClient)
-		throttle   bool
-		err        error
-		metricFile string
-		update     bool
+		name      string
+		anonymous bool
+		failOpen  bool
+		mocker    func(t *testing.T, c *MockDDBClient, now int64)
+		want      Decision
+		wantErr   error
+		wantCalls int
 	}{
 		{
-			name: "throttle when time is not passed and existing token is zero",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  0,
-					LastUpdated: timeNow().UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
+			name: "idle bucket is allowed with a single write",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+					func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+						if !isIdle(in) || !strings.Contains(*in.ConditionExpression, "attribute_exists") {
+							t.Errorf("registered mode must require the item: %s", *in.ConditionExpression)
+						}
+						if strings.Contains(names(in), attrTTL) {
+							t.Errorf("ttl must not be set in registered mode")
+						}
+						if in.ReturnValuesOnConditionCheckFailure != types.ReturnValuesOnConditionCheckFailureAllOld {
+							t.Errorf("old item is required on condition check failure")
+						}
+						return &dynamodb.UpdateItemOutput{}, nil
+					})
 			},
-			throttle:   true,
-			metricFile: "token-run-out.json",
+			want: Decision{Allowed: true, Remaining: 3},
 		},
 		{
-			name: "throttle when bucket id is invalid",
-			mocker: func(client *mock.MockDDBClient) {
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					// empty item for both eventual and consistent reads
-					Return(&dynamodb.GetItemOutput{Item: map[string]types.AttributeValue{}}, nil).
-					Times(2)
+			name: "busy bucket is allowed via the busy path",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				old := now + 2*emission
+				gomock.InOrder(
+					c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, &ddbItem{TAT: old})),
+					c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+						func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+							if isIdle(in) {
+								t.Errorf("want busy path: %s", *in.ConditionExpression)
+							}
+							return &dynamodb.UpdateItemOutput{Attributes: newAttr(t, &ddbItem{TAT: old + emission})}, nil
+						}),
+				)
 			},
-			throttle:   true,
-			metricFile: "empty-result.json",
-			err:        ErrInvalidBucketID,
+			// tat = now + 3 emissions: (6s - 6s) / 2s + 1
+			want: Decision{Allowed: true, Remaining: 1},
 		},
 		{
-			name: "not throttle when token is refilled due to passed time",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  0,
-					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, nil)
+			name: "exhausted bucket is denied without another write",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, ccf(t, &ddbItem{TAT: now + tolerance + emission}))
 			},
-			throttle: false,
+			want: Decision{Allowed: false, RetryAfter: 2 * time.Second},
 		},
 		{
-			name: "throttle when getItem returns API rate limit exceeded",
-			mocker: func(client *mock.MockDDBClient) {
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.LimitExceededException{Message: aws.String("my limit exceeded error")})
+			name: "concurrent idle update falls back to the idle path again",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				gomock.InOrder(
+					c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, &ddbItem{TAT: now - 1})),
+					c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil),
+				)
 			},
-			throttle:   true,
-			err:        ErrRateLimitExceeded,
-			metricFile: "get-item-rate-limit-exceeded.json",
+			want: Decision{Allowed: true, Remaining: 3},
 		},
 		{
-			name: "throttle when updateItem of refillToken returns DDB API rate limit exceeded",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  1,
-					LastUpdated: timeNow().UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.LimitExceededException{Message: aws.String("CCF error")})
+			name: "heavy contention is denied for an emission interval",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, ccf(t, &ddbItem{TAT: now + emission})).Times(maxAttempts)
 			},
-			throttle:   true,
-			err:        ErrRateLimitExceeded,
-			metricFile: "update-item-rate-limit-exceeded.json",
+			want: Decision{Allowed: false, RetryAfter: 2 * time.Second},
 		},
 		{
-			name: "not throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken succeeded then one token is available at least",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  0,
-					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, nil)
+			name: "unregistered bucket id",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, nil))
 			},
-			throttle: false,
-			err:      nil,
+			wantErr: ErrInvalidBucketID,
 		},
 		{
-			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken failed then returns zero token",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  1,
-					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.InternalServerError{Message: aws.String("my internal server error")})
+			name:      "anonymous bucket is created with ttl",
+			anonymous: true,
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).DoAndReturn(
+					func(_ context.Context, in *dynamodb.UpdateItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error) {
+						if !strings.Contains(*in.ConditionExpression, "attribute_not_exists") {
+							t.Errorf("anonymous mode must allow a missing item: %s", *in.ConditionExpression)
+						}
+						if !strings.Contains(names(in), attrTTL) {
+							t.Errorf("ttl must be set in anonymous mode")
+						}
+						return &dynamodb.UpdateItemOutput{}, nil
+					})
 			},
-			metricFile: "fallback-subtract-token-failed-due-to-internal-error.json",
-			throttle:   true,
-			err:        ErrInternal,
+			want: Decision{Allowed: true, Remaining: 3},
 		},
 		{
-			name: "throttle if updateItem of refillToken returns an internal error",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  2,
-					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.InternalServerError{Message: aws.String("my internal server error")})
+			name: "dynamodb throttling is denied by default",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.ProvisionedThroughputExceededException{Message: aws.String("slow down")})
 			},
-			throttle:   true,
-			metricFile: "refill-token-with-fail-opt-internal-server-error.json",
-			err:        ErrInternal,
+			want:    Decision{Allowed: false},
+			wantErr: ErrStoreThrottled,
 		},
 		{
-			name: "throttle if updateItem of refillToken returns CCF and fallback updateItem of subtractToken returns CCF then toke run out",
-			mocker: func(client *mock.MockDDBClient) {
-				msg := aws.String("CCF")
-				item := &ddbItem{
-					TokenCount:  1,
-					LastUpdated: timeNow().Add(-cfg.Interval).UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: msg})
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: msg})
+			name:     "dynamodb throttling is allowed with fail-open",
+			failOpen: true,
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.ProvisionedThroughputExceededException{Message: aws.String("slow down")})
 			},
-			throttle:   true,
-			metricFile: "refill-token-fallback-to-subtract-token-return-unexpected-error.json",
-			err:        nil,
+			want:    Decision{Allowed: true},
+			wantErr: ErrStoreThrottled,
 		},
 		{
-			name: "throttle if updateItem of subtractToken returns CCF then token run out",
-			mocker: func(client *mock.MockDDBClient) {
-				item := &ddbItem{
-					TokenCount:  1,
-					LastUpdated: timeNow().UnixMilli(),
-				}
-				client.EXPECT().
-					GetItem(gomock.Any(), gomock.Any()).
-					Return(&dynamodb.GetItemOutput{Item: newAttr(t, item)}, nil)
-				client.EXPECT().
-					UpdateItem(gomock.Any(), gomock.Any()).
-					Return(nil, &types.ConditionalCheckFailedException{Message: aws.String("CCF error")})
+			name: "internal error",
+			mocker: func(t *testing.T, c *MockDDBClient, now int64) {
+				c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+					Return(nil, &types.InternalServerError{Message: aws.String("boom")})
 			},
-			throttle:   true,
-			metricFile: "subtract-token-conditional-check-failed.json",
-			err:        nil,
+			wantErr: ErrInternal,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Cleanup(func() { timeNow = time.Now })
-			t.Cleanup(func() { uuidNewRandom = uuid.NewRandom })
-			timeNow = myNow(0)
-			uuidNewRandom = myUUIDNewRandom(t)
+			now := fixTime(t, 0)
+			c := NewMockDDBClient(gomock.NewController(t))
+			tt.mocker(t, c, now)
 
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			client := mock.NewMockDDBClient(ctrl)
-			tt.mocker(client)
-
-			out := &bytes.Buffer{}
-			rl, err := New(&cfg, client, WithEMFMetrics(out))
+			cfg := testConfig()
+			cfg.AdditionalConfig = &AdditionalConfig{FailOpen: tt.failOpen}
+			if tt.anonymous {
+				cfg.AdditionalConfig.Anonymous = &AnonymousConfig{RecordTTL: time.Hour}
+			}
+			rl, err := New(cfg, c)
 			if err != nil {
 				t.Fatal(err)
 			}
-			throttle, err := rl.ShouldThrottle(context.Background(), "dummy")
-			if throttle != tt.throttle {
-				t.Errorf("want: %v, got: %v", tt.throttle, throttle)
+			got, err := rl.Allow(context.Background(), "dummy")
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("want error %v, got %v", tt.wantErr, err)
 			}
-			if !errors.Is(err, tt.err) {
-				t.Errorf("want: %v, got: %v", err, tt.err)
-			}
-
-			// golden test
-			if tt.throttle || errors.Is(err, ErrRateLimitExceeded) {
-				gotJSON := out.String()
-				if tt.update || updateGolden {
-					writeTestFile(t, gotJSON, tt.metricFile)
-				}
-				wantJSON := readTestFile(t, tt.metricFile)
-				if gotJSON != wantJSON {
-					t.Errorf("want: %s\ngot: %s", wantJSON, gotJSON)
-				}
+			if got != tt.want {
+				t.Errorf("want %+v, got %+v", tt.want, got)
 			}
 		})
 	}
 }
 
-func TestRateLimit_ShouldThrottleWithNegativeCache(t *testing.T) {
-	cfg := Config{
-		TokenPerInterval: 2,
-		BucketSize:       2 * 2,
-		Interval:         3 * time.Second,
-		TableName:        "dummy_table",
-		AdditionalConfig: &AdditionalConfig{
-			NegativeCache: &NegativeCacheConfig{
-				Size: 2,
-			},
-		},
-	}
-
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	client := mock.NewMockDDBClient(ctrl)
-	// eventual read and consistent read, then the second call is served by the negative cache
-	client.EXPECT().
-		GetItem(gomock.Any(), gomock.Any()).
-		Return(&dynamodb.GetItemOutput{}, nil).
-		Times(2)
-
-	l, err := New(&cfg, client)
+func TestRateLimit_Allow_invalidInput(t *testing.T) {
+	rl, err := New(testConfig(), NewMockDDBClient(gomock.NewController(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	throttle, err := l.ShouldThrottle(context.Background(), "invalid-bucket-id")
-	if !errors.Is(err, ErrInvalidBucketID) {
-		t.Errorf("want: %v, got: %v", ErrInvalidBucketID, err)
-	}
-	if !throttle {
-		t.Errorf("should throttle")
-	}
-
-	throttle, err = l.ShouldThrottle(context.Background(), "invalid-bucket-id")
-	if !(errors.Is(err, ErrInvalidBucketID) && strings.Contains(err.Error(), "negative cache") && throttle) {
-		t.Errorf("want: %v, got: %v throttle result: %v", ErrInvalidBucketID, err, throttle)
+	for _, id := range []string{"", strings.Repeat("a", 513)} {
+		d, err := rl.Allow(context.Background(), id)
+		if !errors.Is(err, ErrInvalidBucketID) || d.Allowed {
+			t.Errorf("want denied with %v, got %+v %v", ErrInvalidBucketID, d, err)
+		}
 	}
 }
 
-func TestRateLimit_ShouldThrottleWithDynamoDBLocal(t *testing.T) {
-	t.Run("anonymous", func(t *testing.T) {
-		t.Cleanup(func() { timeNow = time.Now })
+// A denied shard is remembered until it is allowed again, so DynamoDB is not called meanwhile.
+func TestRateLimit_Allow_denyCache(t *testing.T) {
+	now := fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).
+		Return(nil, ccf(t, &ddbItem{TAT: now + tolerance + emission}))
 
-		timeNow = myNow(0)
-		ttl := 24 * time.Hour
-		wantTTL := timeNow().Unix() + int64(ttl.Seconds())
+	metrics := &bytes.Buffer{}
+	rl, err := New(testConfig(), c, WithEMFMetrics(metrics))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if d, err := rl.Allow(ctx, "dummy"); err != nil || d.Allowed || d.RetryAfter != 2*time.Second {
+		t.Fatalf("unexpected %+v %v", d, err)
+	}
 
-		ctx := context.Background()
-		cfg := &Config{
-			TokenPerInterval: 2,
-			BucketSize:       2 * 2,
-			Interval:         3 * time.Second,
-			AdditionalConfig: &AdditionalConfig{
-				Anonymous: &AnonymousConfig{
-					RecordTTL: ttl,
-				},
-			},
-		}
+	fixTime(t, time.Second)
+	d, err := rl.Allow(ctx, "dummy")
+	if err != nil || d.Allowed || d.RetryAfter != time.Second {
+		t.Fatalf("should be denied by the cache for the rest 1s: %+v %v", d, err)
+	}
+	if n := strings.Count(metrics.String(), "\n"); n != 2 {
+		t.Errorf("a throttle metric should be emitted per denial, got %d", n)
+	}
 
-		l := testRateLimit(t, cfg)
-		id := int64String(int64(pickIndex(100000)))
+	// expired: DynamoDB is called again
+	fixTime(t, 2*time.Second)
+	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(&dynamodb.UpdateItemOutput{}, nil)
+	if d, err := rl.Allow(ctx, "dummy"); err != nil || !d.Allowed {
+		t.Fatalf("should be allowed after retry-after: %+v %v", d, err)
+	}
+}
 
-		t.Logf("bucket-id %s\n", id)
-		throttle, err := l.ShouldThrottle(ctx, id)
+// An unregistered id is cached per limiter with a TTL, and PrepareTokens clears it.
+func TestRateLimit_Allow_negativeCache(t *testing.T) {
+	fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, ccf(t, nil))
+
+	a, err := New(testConfig(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := New(testConfig(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := a.Allow(ctx, "unknown"); !errors.Is(err, ErrInvalidBucketID) {
+		t.Fatal(err)
+	}
+	// served by the cache: no DynamoDB call
+	if _, err := a.Allow(ctx, "unknown"); !errors.Is(err, ErrInvalidBucketID) || !strings.Contains(err.Error(), "cached") {
+		t.Fatalf("should be served by the negative cache: %v", err)
+	}
+	if other.ncache.Contains("unknown") {
+		t.Error("negative cache must not be shared between limiters")
+	}
+
+	c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).Return(&dynamodb.BatchWriteItemOutput{}, nil)
+	if err := a.PrepareTokens(ctx, "unknown"); err != nil {
+		t.Fatal(err)
+	}
+	if a.ncache.Contains("unknown") {
+		t.Error("PrepareTokens should remove the id from the negative cache")
+	}
+
+	a.ncache.AddUntil("expiring", timeNow().Add(defaultNegativeCacheTTL))
+	fixTime(t, defaultNegativeCacheTTL)
+	if a.ncache.Contains("expiring") {
+		t.Error("entry should expire")
+	}
+}
+
+func TestRateLimit_PrepareTokens(t *testing.T) {
+	t.Run("puts a full bucket per shard", func(t *testing.T) {
+		c := NewMockDDBClient(gomock.NewController(t))
+		c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+				reqs := in.RequestItems["dummy_table"]
+				if len(reqs) != 1 {
+					t.Fatalf("want 1 shard, got %d", len(reqs))
+				}
+				item := new(ddbItem)
+				if err := attributevalue.UnmarshalMap(reqs[0].PutRequest.Item, item); err != nil {
+					t.Fatal(err)
+				}
+				if item.BucketIDShardID != "key#0" || item.TAT != 0 {
+					t.Errorf("unexpected item %+v", item)
+				}
+				return &dynamodb.BatchWriteItemOutput{}, nil
+			})
+		rl, err := New(testConfig(), c)
 		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-			return
-		}
-
-		if throttle {
-			t.Errorf("unexpected throttle: %v", throttle)
-			return
-		}
-
-		item, _ := l.getTokenItem(ctx, slog.Default(), id, 0)
-		if item.TTL != wantTTL {
-			t.Errorf("unexpected ttl: want: %d, got: %d", wantTTL, item.TTL)
-		}
-	})
-	t.Run("throttle", func(t *testing.T) {
-		t.Cleanup(func() { timeNow = time.Now })
-
-		ctx := context.Background()
-		cfg := &Config{
-			TokenPerInterval: 2,
-			BucketSize:       2 * 2,
-			Interval:         3 * time.Second,
-		}
-		l := testRateLimit(t, cfg)
-
-		id := int64String(int64(pickIndex(100000)))
-
-		// base time
-		timeNow = myNow(0)
-		if err := l.PrepareTokens(ctx, id); err != nil {
 			t.Fatal(err)
 		}
-
-		t.Logf("bucket-id %s\n", id)
-		for i := 0; i < int(cfg.BucketSize); i++ {
-			throttled, err := l.ShouldThrottle(ctx, id)
-			if err != nil {
-				t.Errorf("[%d] unexpected throttle error %v", i, err)
-			}
-			if throttled {
-				t.Errorf("[%d] unexpected throttle", i)
-			}
+		if err := rl.PrepareTokens(context.Background(), "key"); err != nil {
+			t.Fatal(err)
 		}
+	})
 
-		throttled, err := l.ShouldThrottle(context.Background(), id)
+	t.Run("throttling does not panic and emits a metric", func(t *testing.T) {
+		fixTime(t, 0)
+		c := NewMockDDBClient(gomock.NewController(t))
+		c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).
+			Return(nil, &types.ProvisionedThroughputExceededException{Message: aws.String("throttled")})
+		metrics := &bytes.Buffer{}
+		rl, err := New(testConfig(), c, WithEMFMetrics(metrics))
 		if err != nil {
-			t.Errorf("unexpected throttle error %v", err)
+			t.Fatal(err)
 		}
-		if !throttled {
-			item, _ := l.getTokenItem(context.Background(), logger, id, 0)
-			t.Errorf("should non throttle: %v", item.TokenCount)
+		if err := rl.PrepareTokens(context.Background(), "key"); !errors.Is(err, ErrStoreThrottled) {
+			t.Errorf("want %v, got %v", ErrStoreThrottled, err)
 		}
+		if !strings.Contains(metrics.String(), `"Operation":"BatchWriteItem"`) {
+			t.Errorf("throttle metric should be emitted: %s", metrics.String())
+		}
+	})
 
-		// wait interval and refill base value
-		// 0 + base
-		timeNow = myNow(cfg.Interval)
-		t.Logf("getToken %v\n", timeNow().UnixMilli())
-		token, err := l.getToken(ctx, logger, id, 0)
+	t.Run("retry stops on context cancellation", func(t *testing.T) {
+		c := NewMockDDBClient(gomock.NewController(t))
+		ctx, cancel := context.WithCancel(context.Background())
+		c.EXPECT().BatchWriteItem(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, in *dynamodb.BatchWriteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+				cancel()
+				return &dynamodb.BatchWriteItemOutput{UnprocessedItems: in.RequestItems}, nil
+			})
+		rl, err := New(testConfig(), c)
 		if err != nil {
-			t.Errorf("get-token error %v", err)
+			t.Fatal(err)
 		}
-		if want := cfg.TokenPerInterval; token != want {
-			t.Errorf("want %d but got %d", want, token)
+		if err := rl.PrepareTokens(ctx, "key"); !errors.Is(err, context.Canceled) {
+			t.Errorf("want %v, got %v", context.Canceled, err)
 		}
+	})
 
-		// wait interval and refill base value
-		// base -1 + base
-		timeNow = myNow(cfg.Interval * 2)
-		t.Logf("getToken %v\n", timeNow().UnixMilli())
-		token, err = l.getToken(ctx, logger, id, 0)
+	t.Run("invalid bucket id", func(t *testing.T) {
+		rl, err := New(testConfig(), NewMockDDBClient(gomock.NewController(t)))
 		if err != nil {
-			t.Errorf("get-token error %v", err)
+			t.Fatal(err)
 		}
-		if want := cfg.BucketSize - 1; token != want {
-			t.Errorf("want %d but got %d", want, token)
-		}
-
-		// wait interval and refill
-		timeNow = myNow(cfg.Interval * 3)
-		t.Logf("getToken %v\n", timeNow().UnixMilli())
-		token, err = l.getToken(ctx, logger, id, 0)
-		if err != nil {
-			t.Errorf("get-token error %v", err)
-		}
-		if want := cfg.BucketSize; token != want {
-			t.Errorf("want %d but got %d", want, token)
+		if err := rl.PrepareTokens(context.Background(), ""); !errors.Is(err, ErrInvalidBucketID) {
+			t.Errorf("want %v, got %v", ErrInvalidBucketID, err)
 		}
 	})
 }
 
-func TestRateLimit_calculateRefillToken(t *testing.T) {
-	tests := []struct {
-		name     string
-		want     int64
-		interval time.Duration
-		base     int64
-		wait     time.Duration
-		cur      int64
-		// wantCarry is the elapsed time that is not consumed by refilling
-		wantCarry time.Duration
-	}{
-		{
-			name:     "not wait",
-			interval: 2 * time.Second,
-			base:     10,
-			want:     0,
-			wait:     0 * time.Second,
-		},
-		{
-			name:     "waiting an interval add one base",
-			interval: 2 * time.Second,
-			base:     10,
-			want:     10,
-			wait:     2 * time.Second,
-		},
-		{
-			name:      "waiting an interval and half add one base and carry over the half",
-			interval:  2 * time.Second,
-			base:      10,
-			want:      10,
-			wait:      3 * time.Second,
-			wantCarry: 1 * time.Second,
-		},
-		{
-			name:     "waiting some intervals add to bucket size",
-			interval: 2 * time.Second,
-			base:     10,
-			want:     20,
-			wait:     41 * time.Second,
-			// remainder is less than an interval
-			wantCarry: 1 * time.Second,
-		},
-		{
-			name:     "full bucket refills nothing",
-			interval: 2 * time.Second,
-			base:     10,
-			cur:      20,
-			want:     0,
-			wait:     4 * time.Second,
-		},
-		{
-			name:     "current 1 and waiting interval add one base",
-			interval: 2 * time.Second,
-			base:     10,
-			cur:      1,
-			want:     10,
-			wait:     2 * time.Second,
-		},
-		{
-			name:     "current 1 and waiting some interval add bucket size -1",
-			interval: 2 * time.Second,
-			base:     10,
-			cur:      1,
-			want:     19,
-			wait:     40 * time.Second,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			bucket, err := newTokenBucket(tt.base, tt.base*2, tt.interval)
+// Errors must be a single line, keep sentinel errors, and never contain the raw bucket id.
+func TestRateLimit_errorsAndLogsAreRedacted(t *testing.T) {
+	const secret = "sk-secret-api-key"
+	for _, upstream := range []error{
+		&types.InternalServerError{Message: aws.String("boom")},
+		&types.ProvisionedThroughputExceededException{Message: aws.String("slow down")},
+	} {
+		t.Run(fmt.Sprintf("%T", upstream), func(t *testing.T) {
+			fixTime(t, 0)
+			c := NewMockDDBClient(gomock.NewController(t))
+			c.EXPECT().UpdateItem(gomock.Any(), gomock.Any()).Return(nil, upstream)
+			metrics, logs := &bytes.Buffer{}, &bytes.Buffer{}
+			rl, err := New(testConfig(), c, WithEMFMetrics(metrics),
+				WithLogger(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))))
 			if err != nil {
 				t.Fatal(err)
 			}
-			now := timeNow()
-			l := &RateLimit{
-				client:    nil,
-				bucket:    bucket,
-				tableName: "dummy",
+			_, err = rl.Allow(context.Background(), secret)
+			if err == nil {
+				t.Fatal("want an error")
 			}
-			got, gotLastUpdated := l.calculateRefillToken(&ddbItem{
-				LastUpdated: now.Add(-tt.wait).UnixMilli(),
-				TokenCount:  tt.cur,
-				shardID:     0,
-			}, now.UnixMilli())
-
-			if got != tt.want {
-				t.Errorf("RateLimit.calculateRefillToken() = %v, want %v", got, tt.want)
+			if strings.Contains(err.Error(), "\n") {
+				t.Errorf("error must be a single line: %q", err.Error())
 			}
-			if want := now.Add(-tt.wantCarry).UnixMilli(); gotLastUpdated != want {
-				t.Errorf("RateLimit.calculateRefillToken() last_updated = %v, want %v", gotLastUpdated, want)
+			for name, s := range map[string]string{"error": err.Error(), "metrics": metrics.String(), "logs": logs.String()} {
+				if strings.Contains(s, secret) {
+					t.Errorf("%s must not contain the raw bucket id: %s", name, s)
+				}
+			}
+			if !strings.Contains(err.Error(), redactID(secret)) {
+				t.Errorf("error should contain the redacted id: %s", err.Error())
 			}
 		})
 	}
 }
 
-func readTestFile(t *testing.T, filename string) string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", filename))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
-}
+// BucketID must not be a metric dimension (high cardinality) and each EMF record must end with a newline.
+func TestEMFFormat(t *testing.T) {
+	out := &bytes.Buffer{}
+	outputLog(out, buildThrottleMetric("table", "bucket", "0"))
+	outputLog(out, buildDDBThrottleMetric("table", "UpdateItem", "bucket", "0"))
 
-func writeTestFile(t *testing.T, data, filename string) {
-	t.Helper()
-	err := os.WriteFile(filepath.Join("testdata", filename), []byte(data), 0600)
-	if err != nil {
-		t.Fatal(err)
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d: %q", len(lines), out.String())
+	}
+	for _, m := range []CloudWatchMetrics{throttleMetrics, ddbThrottleMetrics} {
+		for _, dims := range m.Dimensions {
+			for _, d := range dims {
+				if d == "BucketID" {
+					t.Errorf("BucketID must not be a dimension: %v", dims)
+				}
+			}
+		}
 	}
 }
 
 func Test_splitPartitionKey(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        string
-		wantBucketID string
-		wantShardID  string
-		wantErr      bool
+		input              string
+		wantBucket, wantID string
+		wantErr            bool
 	}{
-		{
-			name:         "input",
-			input:        fmt.Sprintf("test%s1", delimiter),
-			wantBucketID: "test",
-			wantShardID:  "1",
-		},
-		{
-			name:         "check last index",
-			input:        fmt.Sprintf("test%sa%s1", delimiter, delimiter),
-			wantBucketID: "test#a",
-			wantShardID:  "1",
-		},
-		{
-			name:    "invalid input",
-			input:   fmt.Sprintf("test%s", delimiter),
-			wantErr: true,
-		},
-		{
-			name:    "invalid input",
-			input:   "test",
-			wantErr: true,
-		},
+		{input: "test#1", wantBucket: "test", wantID: "1"},
+		{input: "test#a#1", wantBucket: "test#a", wantID: "1"},
+		{input: "test#", wantErr: true},
+		{input: "#1", wantErr: true},
+		{input: "test", wantErr: true},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotBucketID, gotShardID, err := splitPartitionKey(tt.input)
+		t.Run(tt.input, func(t *testing.T) {
+			b, s, err := splitPartitionKey(tt.input)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("splitPartitionKey() error = %v, wantErr %v", err, tt.wantErr)
-				return
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if gotBucketID != tt.wantBucketID {
-				t.Errorf("splitPartitionKey() gotBucketID = %v, want %v", gotBucketID, tt.wantBucketID)
-			}
-			if gotShardID != tt.wantShardID {
-				t.Errorf("splitPartitionKey() gotShardID = %v, want %v", gotShardID, tt.wantShardID)
+			if b != tt.wantBucket || s != tt.wantID {
+				t.Errorf("got %q %q", b, s)
 			}
 		})
 	}
+}
+
+// ---- DynamoDB Local (make start-local) ----
+
+func testClient(t *testing.T) *dynamodb.Client {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "123456")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "123456")
+	t.Setenv("AWS_DEFAULT_REGION", "us-east-1")
+	cfg, err := config.LoadDefaultConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+		o.BaseEndpoint = aws.String("http://localhost:8000")
+	})
+}
+
+func testRateLimit(t *testing.T, cfg *Config) *RateLimit {
+	t.Helper()
+	client := testClient(t)
+	cfg.TableName = "test_gcra_table"
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := CreateTable(ctx, cfg.TableName, client); err != nil {
+		// never skip silently on CI
+		if os.Getenv("CI") != "" {
+			t.Fatalf("DynamoDB Local is not available: %v", err)
+		}
+		t.Skipf("DynamoDB Local is not available (run make start-local): %v", err)
+	}
+	l, err := New(cfg, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// deny cache hides DynamoDB behavior in these tests
+	l.dcache = nil
+	return l
+}
+
+func uniqueID(prefix string) string {
+	return prefix + "-" + uuid.NewString()
+}
+
+func TestRateLimit_WithDynamoDBLocal(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("burst, deny, then refill", func(t *testing.T) {
+		l := testRateLimit(t, testConfig())
+		id := uniqueID("burst")
+		fixTime(t, 0)
+		if err := l.PrepareTokens(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		for i, want := range []int64{3, 2, 1, 0} {
+			d, err := l.Allow(ctx, id)
+			if err != nil || !d.Allowed || d.Remaining != want {
+				t.Fatalf("[%d] want allowed with %d remaining: %+v %v", i, want, d, err)
+			}
+		}
+		d, err := l.Allow(ctx, id)
+		if err != nil || d.Allowed || d.RetryAfter != 2*time.Second {
+			t.Fatalf("want denied for 2s: %+v %v", d, err)
+		}
+		fixTime(t, 2*time.Second)
+		if d, err := l.Allow(ctx, id); err != nil || !d.Allowed {
+			t.Fatalf("want allowed after 2s: %+v %v", d, err)
+		}
+	})
+
+	t.Run("steady traffic keeps being allowed", func(t *testing.T) {
+		l := testRateLimit(t, testConfig())
+		id := uniqueID("steady")
+		fixTime(t, 0)
+		if err := l.PrepareTokens(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 10; i++ {
+			fixTime(t, time.Duration(i)*2*time.Second)
+			if d, err := l.Allow(ctx, id); err != nil || !d.Allowed {
+				t.Fatalf("[%d] want allowed: %+v %v", i, d, err)
+			}
+		}
+	})
+
+	t.Run("unregistered id", func(t *testing.T) {
+		l := testRateLimit(t, testConfig())
+		if _, err := l.Allow(ctx, uniqueID("unknown")); !errors.Is(err, ErrInvalidBucketID) {
+			t.Fatalf("want %v, got %v", ErrInvalidBucketID, err)
+		}
+	})
+
+	t.Run("anonymous creates an item with ttl", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.AdditionalConfig = &AdditionalConfig{Anonymous: &AnonymousConfig{RecordTTL: time.Hour}}
+		l := testRateLimit(t, cfg)
+		id := uniqueID("anon")
+		now := fixTime(t, 0)
+		if d, err := l.Allow(ctx, id); err != nil || !d.Allowed {
+			t.Fatalf("want allowed: %+v %v", d, err)
+		}
+		out, err := l.client.c.(*dynamodb.Client).GetItem(ctx, &dynamodb.GetItemInput{
+			TableName: &l.tableName, Key: buildPartitionKey(id, 0), ConsistentRead: aws.Bool(true),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item := new(ddbItem)
+		if err := attributevalue.UnmarshalMap(out.Item, item); err != nil {
+			t.Fatal(err)
+		}
+		if want := time.Unix(0, now).Add(time.Hour).Unix(); item.TTL != want {
+			t.Errorf("ttl: want %d, got %d", want, item.TTL)
+		}
+	})
+
+	t.Run("concurrent requests never exceed the burst", func(t *testing.T) {
+		l := testRateLimit(t, testConfig())
+		id := uniqueID("concurrent")
+		fixTime(t, 0)
+		if err := l.PrepareTokens(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		var allowed atomic.Int64
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if d, err := l.Allow(ctx, id); err == nil && d.Allowed {
+					allowed.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		if n := allowed.Load(); n > 4 || n == 0 {
+			t.Errorf("allowed %d requests, want 1..4", n)
+		}
+	})
 }

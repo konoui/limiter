@@ -14,9 +14,13 @@ var (
 	errInvalidRateLimitArg        = errors.New("token_per_interval must be greater than zero")
 	errInvalidRateLimitBucketSize = errors.New("bucket_size must be larger than or equal to token_per_interval")
 	errInvalidInterval            = errors.New("interval must be greater than or equal 1 sec")
-	ErrRateLimitExceeded          = errors.New("API rate limit exceeded")
-	ErrInternal                   = errors.New("internal API error")
-	ErrInvalidBucketID            = errors.New("invalid bucket id")
+	// ErrStoreThrottled means DynamoDB throttled the request. It is a server side capacity problem,
+	// not that the caller exceeded its rate limit. The caller's rate limit is reported by Decision.Allowed.
+	ErrStoreThrottled = errors.New("dynamodb throttled the request")
+	// ErrInternal means DynamoDB or the limiter failed unexpectedly.
+	ErrInternal = errors.New("internal error")
+	// ErrInvalidBucketID means the bucket id is empty, too long or not registered.
+	ErrInvalidBucketID = errors.New("invalid bucket id")
 )
 
 // redactID returns a short, stable and non-reversible identifier for a bucket id.

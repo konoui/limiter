@@ -9,18 +9,18 @@ import (
 const (
 	defaultNegativeCacheSize = 1000
 	defaultNegativeCacheTTL  = 5 * time.Minute
+	defaultDenyCacheSize     = 10000
 )
 
-// negativeCache remembers invalid bucket ids for a limited time.
-// Each RateLimit owns its own instance so that limiters for different tables do not affect each other.
-// A nil *negativeCache is valid and behaves as a disabled cache.
-type negativeCache struct {
-	c   *lru.Cache[string, time.Time]
-	ttl time.Duration
+// expiringCache is a size bounded LRU whose entries expire at a given time.
+// Each RateLimit owns its own instances so that limiters for different tables do not affect each other.
+// A nil *expiringCache is valid and behaves as a disabled cache.
+type expiringCache struct {
+	c *lru.Cache[string, time.Time]
 }
 
-// newNegativeCache returns nil (disabled) when size is zero.
-func newNegativeCache(size int, ttl time.Duration) *negativeCache {
+// newExpiringCache returns nil (disabled) when size is zero.
+func newExpiringCache(size int) *expiringCache {
 	if size <= 0 {
 		return nil
 	}
@@ -28,34 +28,40 @@ func newNegativeCache(size int, ttl time.Duration) *negativeCache {
 	if err != nil {
 		return nil
 	}
-	return &negativeCache{c: c, ttl: ttl}
+	return &expiringCache{c: c}
 }
 
-func (n *negativeCache) Contains(key string) bool {
-	if n == nil {
-		return false
+// Get returns the expiry of the key if it exists and has not expired.
+func (e *expiringCache) Get(key string) (time.Time, bool) {
+	if e == nil {
+		return time.Time{}, false
 	}
-	expiresAt, ok := n.c.Get(key)
+	expiresAt, ok := e.c.Get(key)
 	if !ok {
-		return false
+		return time.Time{}, false
 	}
 	if !timeNow().Before(expiresAt) {
-		n.c.Remove(key)
-		return false
+		e.c.Remove(key)
+		return time.Time{}, false
 	}
-	return true
+	return expiresAt, true
 }
 
-func (n *negativeCache) Add(key string) {
-	if n == nil {
+func (e *expiringCache) Contains(key string) bool {
+	_, ok := e.Get(key)
+	return ok
+}
+
+func (e *expiringCache) AddUntil(key string, expiresAt time.Time) {
+	if e == nil {
 		return
 	}
-	n.c.Add(key, timeNow().Add(n.ttl))
+	e.c.Add(key, expiresAt)
 }
 
-func (n *negativeCache) Len() int {
-	if n == nil {
+func (e *expiringCache) Len() int {
+	if e == nil {
 		return 0
 	}
-	return n.c.Len()
+	return e.c.Len()
 }
