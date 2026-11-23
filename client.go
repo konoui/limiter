@@ -17,6 +17,7 @@ type DDBClient interface {
 	GetItem(context.Context, *dynamodb.GetItemInput, ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	UpdateItem(context.Context, *dynamodb.UpdateItemInput, ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	BatchWriteItem(context.Context, *dynamodb.BatchWriteItemInput, ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
+	DeleteItem(context.Context, *dynamodb.DeleteItemInput, ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 // wrappedDDBClient classifies DynamoDB throttling errors and records them.
@@ -52,6 +53,16 @@ func (c *wrappedDDBClient) BatchWriteItem(ctx context.Context, logger *slog.Logg
 		return nil, c.classify(ctx, "BatchWriteItem", err)
 	}
 	debugResponse(ctx, logger, "batch-write-item", resp.ResultMetadata, resp.ConsumedCapacity)
+	return resp, nil
+}
+
+func (c *wrappedDDBClient) DeleteItem(ctx context.Context, logger *slog.Logger,
+	input *dynamodb.DeleteItemInput, params ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+	resp, err := c.c.DeleteItem(ctx, input, params...)
+	if err != nil {
+		return nil, c.classify(ctx, "DeleteItem", err)
+	}
+	debugResponse(ctx, logger, "delete-item", resp.ResultMetadata, resp.ConsumedCapacity)
 	return resp, nil
 }
 

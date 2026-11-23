@@ -146,3 +146,41 @@ func (mr *MockPreparerMockRecorder) PrepareTokens(ctx, bucketID any) *gomock.Cal
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PrepareTokens", reflect.TypeOf((*MockPreparer)(nil).PrepareTokens), ctx, bucketID)
 }
+
+// MockRevoker is a mock of Revoker interface.
+type MockRevoker struct {
+	ctrl     *gomock.Controller
+	recorder *MockRevokerMockRecorder
+	isgomock struct{}
+}
+
+// MockRevokerMockRecorder is the mock recorder for MockRevoker.
+type MockRevokerMockRecorder struct {
+	mock *MockRevoker
+}
+
+// NewMockRevoker creates a new mock instance.
+func NewMockRevoker(ctrl *gomock.Controller) *MockRevoker {
+	mock := &MockRevoker{ctrl: ctrl}
+	mock.recorder = &MockRevokerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockRevoker) EXPECT() *MockRevokerMockRecorder {
+	return m.recorder
+}
+
+// RevokeTokens mocks base method.
+func (m *MockRevoker) RevokeTokens(ctx context.Context, bucketID string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RevokeTokens", ctx, bucketID)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// RevokeTokens indicates an expected call of RevokeTokens.
+func (mr *MockRevokerMockRecorder) RevokeTokens(ctx, bucketID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RevokeTokens", reflect.TypeOf((*MockRevoker)(nil).RevokeTokens), ctx, bucketID)
+}

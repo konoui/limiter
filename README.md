@@ -32,8 +32,11 @@ Requests try shards in random order and skip shards known to be exhausted, up to
 `PrepareTokens` writes a registration item `<id>#meta`. Shard items `<id>#<n>` are created on demand,
 so `shards` (and the bucket settings) can be changed at any time without re-registering ids.
 Registered ids are cached per instance (`registration_cache`, 1 minute by default);
-deleting the registration item revokes an id after the cache expires.
+`RevokeTokens` deletes the registration item and other instances stop allowing the id when the cache expires.
 Ids registered by the token bucket version are still accepted.
+
+Shard items expire by DynamoDB TTL one hour after their bucket becomes full again (or after `record_ttl`
+in anonymous mode, whichever is later), so idle, revoked and orphan items do not accumulate.
 
 #### Usage
 

@@ -106,6 +106,38 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 	return cmd
 }
 
+func NewRevokeToken(c *dynamodb.Client) *cobra.Command {
+	var fpath, key, token string
+	cmd := &cobra.Command{
+		Use:  "revoke-token",
+		Args: cobra.MinimumNArgs(0),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			r, err := newLimiters(fpath, c)
+			if err != nil {
+				return err
+			}
+			rl, ok := r[key]
+			if !ok {
+				return fmt.Errorf("%s does not exist in %s", key, fpath)
+			}
+			if err := rl.RevokeTokens(cmd.Context(), token); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "revoked. running instances allow it until their registration cache expires")
+			return nil
+		},
+		SilenceUsage:       true,
+		DisableSuggestions: true,
+	}
+	cmd.PersistentFlags().StringVar(&key, "config-name", "", "config name in the config file")
+	cmd.PersistentFlags().StringVar(&fpath, "config-file", "", "config file path")
+	cmd.PersistentFlags().StringVar(&token, "token", "", "token to revoke")
+	_ = cmd.MarkPersistentFlagRequired("config-file")
+	_ = cmd.MarkPersistentFlagRequired("config-name")
+	_ = cmd.MarkPersistentFlagRequired("token")
+	return cmd
+}
+
 func NewStartServer(c *dynamodb.Client) *cobra.Command {
 	var filepath string
 	cmd := &cobra.Command{
@@ -159,6 +191,7 @@ func main() {
 	rootCmd.AddCommand(
 		NewCreateTableCmd(c),
 		NewCreateToken(c),
+		NewRevokeToken(c),
 		NewStartServer(c),
 	)
 	if err := rootCmd.Execute(); err != nil {

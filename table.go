@@ -25,7 +25,7 @@ type ddbItem struct {
 	BucketIDShardID string `dynamodbav:"bucket_id_shard_id"`
 	// TAT is the theoretical arrival time in unix nanoseconds
 	TAT int64 `dynamodbav:"tat"`
-	// TTL is the expiry in unix seconds. Only set in anonymous mode.
+	// TTL is the expiry in unix seconds, after the latest possible TAT. See withTTL.
 	TTL int64 `dynamodbav:"ttl,omitempty"`
 }
 

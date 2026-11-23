@@ -108,8 +108,8 @@ func TestRateLimit_Allow(t *testing.T) {
 						if !isIdle(in) || !strings.Contains(*in.ConditionExpression, "attribute_not_exists") {
 							t.Errorf("shard item should be created on demand: %s", *in.ConditionExpression)
 						}
-						if strings.Contains(names(in), attrTTL) {
-							t.Errorf("ttl must not be set in registered mode")
+						if !strings.Contains(names(in), attrTTL) {
+							t.Errorf("ttl must be set so that idle shard items expire")
 						}
 						if in.ReturnValuesOnConditionCheckFailure != types.ReturnValuesOnConditionCheckFailureAllOld {
 							t.Errorf("old item is required on condition check failure")
@@ -464,6 +464,57 @@ func TestRateLimit_Allow_registration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRateLimit_shardExpiry(t *testing.T) {
+	now := fixTime(t, 0)
+	s := shardParams{emission: 2 * time.Second, tolerance: 6 * time.Second, burst: 4}
+	base := time.Unix(0, now)
+
+	registered := &RateLimit{}
+	if got, want := registered.shardExpiry(now, s), base.Add(8*time.Second+shardTTLMargin).Unix(); got != want {
+		t.Errorf("registered: want %d, got %d", want, got)
+	}
+	// a long record_ttl is kept
+	long := &RateLimit{anonymous: true, ttl: 24 * time.Hour}
+	if got, want := long.shardExpiry(now, s), base.Add(24*time.Hour).Unix(); got != want {
+		t.Errorf("long record_ttl: want %d, got %d", want, got)
+	}
+	// a short record_ttl must not delete an item before its TAT passes
+	short := &RateLimit{anonymous: true, ttl: time.Second}
+	if got, want := short.shardExpiry(now, s), base.Add(8*time.Second+shardTTLMargin).Unix(); got != want {
+		t.Errorf("short record_ttl: want %d, got %d", want, got)
+	}
+}
+
+func TestRateLimit_RevokeTokens(t *testing.T) {
+	fixTime(t, 0)
+	c := NewMockDDBClient(gomock.NewController(t))
+	deleted := []string{}
+	c.EXPECT().DeleteItem(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
+			deleted = append(deleted, in.Key[attrBucketIDShardID].(*types.AttributeValueMemberS).Value)
+			return &dynamodb.DeleteItemOutput{}, nil
+		}).Times(2)
+	rl, err := New(testConfig(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	rl.rcache.AddUntil("k", timeNow().Add(time.Minute))
+	if err := rl.RevokeTokens(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deleted, ",") != "k#meta,k#0" {
+		t.Errorf("registration item and the legacy shard 0 should be deleted: %v", deleted)
+	}
+	// this instance stops allowing it immediately, without reading DynamoDB
+	if _, err := rl.Allow(ctx, "k"); !errors.Is(err, ErrInvalidBucketID) {
+		t.Errorf("want %v, got %v", ErrInvalidBucketID, err)
+	}
+	if err := rl.RevokeTokens(ctx, ""); !errors.Is(err, ErrInvalidBucketID) {
+		t.Errorf("want %v, got %v", ErrInvalidBucketID, err)
 	}
 }
 
@@ -834,7 +885,8 @@ func TestRateLimit_WithDynamoDBLocal(t *testing.T) {
 		if err := attributevalue.UnmarshalMap(out.Item, item); err != nil {
 			t.Fatal(err)
 		}
-		if want := time.Unix(0, now).Add(time.Hour).Unix(); item.TTL != want {
+		// record_ttl (1h) is shorter than the latest TAT + margin (6s + 2s + 1h)
+		if want := time.Unix(0, now).Add(time.Hour + 8*time.Second).Unix(); item.TTL != want {
 			t.Errorf("ttl: want %d, got %d", want, item.TTL)
 		}
 	})
@@ -856,7 +908,7 @@ func TestRateLimit_WithDynamoDBLocal(t *testing.T) {
 		}
 	})
 
-	t.Run("deleting the registration item revokes the id", func(t *testing.T) {
+	t.Run("RevokeTokens revokes the id", func(t *testing.T) {
 		l := testRateLimit(t, testConfig())
 		id := uniqueID("revoke")
 		fixTime(t, 0)
@@ -866,11 +918,7 @@ func TestRateLimit_WithDynamoDBLocal(t *testing.T) {
 		if d, err := l.Allow(ctx, id); err != nil || !d.Allowed {
 			t.Fatalf("want allowed: %+v %v", d, err)
 		}
-		_, err := l.client.c.(*dynamodb.Client).DeleteItem(ctx, &dynamodb.DeleteItemInput{
-			TableName: &l.tableName,
-			Key:       map[string]types.AttributeValue{attrBucketIDShardID: &types.AttributeValueMemberS{Value: metaPartitionKey(id)}},
-		})
-		if err != nil {
+		if err := l.RevokeTokens(ctx, id); err != nil {
 			t.Fatal(err)
 		}
 		// another instance (no registration cache entry)

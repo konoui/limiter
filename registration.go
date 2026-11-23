@@ -94,6 +94,31 @@ func (l *RateLimit) getItem(ctx context.Context, logger *slog.Logger, pk string)
 	return out.Item, nil
 }
 
+// RevokeTokens deletes the registration of the bucket id. Other instances keep allowing it until their
+// registration cache entries expire (additional.registration_cache.ttl). Shard items expire by TTL.
+// Revoking an unregistered id is not an error.
+func (l *RateLimit) RevokeTokens(ctx context.Context, bucketID string) error {
+	if bucketID == "" || len(bucketID) > l.maxLength {
+		return fmt.Errorf("revoke-tokens: bucket id must be 1 to %d bytes: %w", l.maxLength, ErrInvalidBucketID)
+	}
+	logger := l.logger.With(slog.String("bucket_id", redactID(bucketID)))
+	keys := []string{metaPartitionKey(bucketID)}
+	// ids registered by the token bucket version are recognized by shard 0
+	keys = append(keys, makePartitionKey(bucketID, 0))
+	for _, pk := range keys {
+		_, err := l.client.DeleteItem(ctx, logger, &dynamodb.DeleteItemInput{
+			TableName: &l.tableName,
+			Key:       map[string]types.AttributeValue{attrBucketIDShardID: &types.AttributeValueMemberS{Value: pk}},
+		})
+		if err != nil {
+			return fmt.Errorf("revoke-tokens: %w", err)
+		}
+	}
+	l.rcache.Remove(bucketID)
+	l.ncache.AddUntil(bucketID, timeNow().Add(l.ncacheTTL))
+	return nil
+}
+
 func registrationRequest(bucketID string, now time.Time) (types.WriteRequest, error) {
 	attrs, err := attributevalue.MarshalMap(&registrationItem{
 		BucketIDShardID: metaPartitionKey(bucketID),

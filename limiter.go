@@ -24,6 +24,7 @@ var (
 	shardOrder = rand.Perm //nolint:gosec // shard selection is not security sensitive
 
 	_ LimitPreparer = &RateLimit{}
+	_ Revoker       = &RateLimit{}
 )
 
 const (
@@ -60,6 +61,11 @@ type Limiter interface {
 type Preparer interface {
 	// PrepareTokens registers a bucket id with a full bucket.
 	PrepareTokens(ctx context.Context, bucketID string) error
+}
+
+type Revoker interface {
+	// RevokeTokens deletes the registration of a bucket id.
+	RevokeTokens(ctx context.Context, bucketID string) error
 }
 
 type RateLimit struct {
@@ -318,7 +324,7 @@ func (l *RateLimit) writeIdle(ctx context.Context, logger *slog.Logger, bucketID
 		expression.Name(attrTAT).AttributeNotExists(),
 		expression.Name(attrTAT).LessThan(expression.Value(now)),
 	)
-	update := l.withTTL(expression.Set(expression.Name(attrTAT), expression.Value(tat)), now)
+	update := l.withTTL(expression.Set(expression.Name(attrTAT), expression.Value(tat)), now, s)
 	if _, err := l.update(ctx, logger, bucketID, shardID, cond, update, types.ReturnValueNone); err != nil {
 		return 0, err
 	}
@@ -328,7 +334,7 @@ func (l *RateLimit) writeIdle(ctx context.Context, logger *slog.Logger, bucketID
 // writeBusy sets TAT = TAT + emission when now <= TAT <= now + tolerance.
 func (l *RateLimit) writeBusy(ctx context.Context, logger *slog.Logger, bucketID string, shardID int, now int64, s shardParams) (int64, error) {
 	cond := expression.Name(attrTAT).Between(expression.Value(now), expression.Value(now+int64(s.tolerance)))
-	update := l.withTTL(expression.Set(expression.Name(attrTAT), expression.Name(attrTAT).Plus(expression.Value(int64(s.emission)))), now)
+	update := l.withTTL(expression.Set(expression.Name(attrTAT), expression.Name(attrTAT).Plus(expression.Value(int64(s.emission)))), now, s)
 	out, err := l.update(ctx, logger, bucketID, shardID, cond, update, types.ReturnValueUpdatedNew)
 	if err != nil {
 		return 0, err
@@ -363,11 +369,26 @@ func (l *RateLimit) update(ctx context.Context, logger *slog.Logger, bucketID st
 	return out, nil
 }
 
-func (l *RateLimit) withTTL(update expression.UpdateBuilder, now int64) expression.UpdateBuilder {
-	if !l.anonymous || l.ttl <= 0 {
-		return update
+// shardTTLMargin keeps a shard item for a while after its bucket became full again.
+const shardTTLMargin = time.Hour
+
+// withTTL sets the expiry of a shard item.
+//
+// After TAT has passed, a shard item is equivalent to a missing item (a full bucket), so it can be deleted
+// safely and is created again on demand. The expiry is after the latest possible TAT (now + tolerance + emission),
+// which keeps the table from growing with idle, revoked or orphan (after reducing shards) items,
+// and never deletes an item while its bucket is still being refilled, even with a short anonymous record_ttl.
+func (l *RateLimit) withTTL(update expression.UpdateBuilder, now int64, s shardParams) expression.UpdateBuilder {
+	return update.Set(expression.Name(attrTTL), expression.Value(l.shardExpiry(now, s)))
+}
+
+func (l *RateLimit) shardExpiry(now int64, s shardParams) int64 {
+	base := time.Unix(0, now)
+	expiry := base.Add(s.tolerance + s.emission + shardTTLMargin)
+	if l.anonymous && base.Add(l.ttl).After(expiry) {
+		expiry = base.Add(l.ttl)
 	}
-	return update.Set(expression.Name(attrTTL), expression.Value(time.Unix(0, now).Add(l.ttl).Unix()))
+	return expiry.Unix()
 }
 
 // PrepareTokens registers the bucket id with a full bucket. An existing bucket is reset.
@@ -380,11 +401,12 @@ func (l *RateLimit) PrepareTokens(ctx context.Context, bucketID string) error {
 
 	// shard items are reset here, but they are also created on demand
 	requests := make([]types.WriteRequest, 0, len(l.gcra.shards)+1)
-	for shardID := range l.gcra.shards {
+	for shardID, s := range l.gcra.shards {
 		attrs, err := attributevalue.MarshalMap(&ddbItem{
 			BucketIDShardID: makePartitionKey(bucketID, shardID),
 			// zero means TAT < now, i.e. the bucket is full
 			TAT: 0,
+			TTL: l.shardExpiry(now.UnixNano(), s),
 		})
 		if err != nil {
 			return fmt.Errorf("prepare-tokens: marshal: %w", err)
