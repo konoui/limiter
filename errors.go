@@ -1,6 +1,8 @@
 package limiter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -9,17 +11,24 @@ import (
 )
 
 var (
-	errInvalidRateLimitArg        = errors.New("rate_limit must be greater than zero")
-	errInvalidRateLimitBucketSize = errors.New("bucket_size must be larger than or equal rate_limit")
+	errInvalidRateLimitArg        = errors.New("token_per_interval must be greater than zero")
+	errInvalidRateLimitBucketSize = errors.New("bucket_size must be larger than or equal to token_per_interval")
 	errInvalidInterval            = errors.New("interval must be greater than or equal 1 sec")
-	ErrRateLimitExceeded          = errors.New("API rate limit exceeded")
-	ErrInternal                   = errors.New("internal API error")
-	ErrInvalidBucketID            = errors.New("invalid bucket id")
+	errInvalidShards              = errors.New("invalid shards")
+	// ErrStoreThrottled means DynamoDB throttled the request. It is a server side capacity problem,
+	// not that the caller exceeded its rate limit. The caller's rate limit is reported by Decision.Allowed.
+	ErrStoreThrottled = errors.New("dynamodb throttled the request")
+	// ErrInternal means DynamoDB or the limiter failed unexpectedly.
+	ErrInternal = errors.New("internal error")
+	// ErrInvalidBucketID means the bucket id is empty, too long or not registered.
+	ErrInvalidBucketID = errors.New("invalid bucket id")
 )
 
-func isErrConditionalCheckFailed(err error) bool {
-	var e *types.ConditionalCheckFailedException
-	return errors.As(err, &e)
+// redactID returns a short, stable and non-reversible identifier for a bucket id.
+// Bucket ids may be secrets such as API keys, so they must not appear in errors, logs or metrics as is.
+func redactID(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "sha256:" + hex.EncodeToString(sum[:6])
 }
 
 // see https://docs.aws.amazon.com/ja_jp/amazondynamodb/latest/developerguide/transaction-apis.html#transaction-conflict-handling

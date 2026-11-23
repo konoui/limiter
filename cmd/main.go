@@ -7,7 +7,6 @@ import (
 
 	"log/slog"
 
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/google/uuid"
 	"github.com/konoui/limiter"
@@ -24,23 +23,23 @@ var (
 	logger = slog.New(slog.NewJSONHandler(
 		os.Stdout,
 		&slog.HandlerOptions{
-			Level: slog.LevelDebug,
+			Level: logLevel(),
 		}))
 )
 
-func NewRootCmd(rl map[string]*limiter.RateLimit) *cobra.Command {
+func NewRootCmd(rl map[string]*limiter.RateLimit, flush func(context.Context) error) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:  "limiter",
 		Args: cobra.MinimumNArgs(0),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if rl != nil {
-				mux, err := testHandler(rl)
-				if err != nil {
-					return err
-				}
-				return StartServer("", mux)
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if rl == nil {
+				return fmt.Errorf("not running on AWS Lambda (%s is not set). run `limiter start-server --config-file <path>` to serve locally", envRunOnLambda)
 			}
-			return fmt.Errorf("non lambda environment")
+			mux, err := testHandler(rl)
+			if err != nil {
+				return err
+			}
+			return StartServer("", flushAfter(flush, mux))
 		},
 		SilenceErrors:      true,
 		DisableSuggestions: true,
@@ -53,7 +52,7 @@ func NewCreateTableCmd(c *dynamodb.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:  "create-table",
 		Args: cobra.MinimumNArgs(0),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := limiter.CreateTable(cmd.Context(), tableName, c); err != nil {
 				return err
 			}
@@ -74,7 +73,7 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:  "create-token",
 		Args: cobra.MinimumNArgs(0),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, err := newLimiters(fpath, c)
 			if err != nil {
 				return err
@@ -94,10 +93,11 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 				return err
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "new token: %s", uid.String())
+			fmt.Fprintf(cmd.OutOrStdout(), "new token: %s\n", uid.String())
 			return nil
-
 		},
+		SilenceUsage:       true,
+		DisableSuggestions: true,
 	}
 	cmd.PersistentFlags().StringVar(&key, "config-name", "", "config name in the config file")
 	cmd.PersistentFlags().StringVar(&fpath, "config-file", "", "config file path")
@@ -106,12 +106,44 @@ func NewCreateToken(c *dynamodb.Client) *cobra.Command {
 	return cmd
 }
 
+func NewRevokeToken(c *dynamodb.Client) *cobra.Command {
+	var fpath, key, token string
+	cmd := &cobra.Command{
+		Use:  "revoke-token",
+		Args: cobra.MinimumNArgs(0),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			r, err := newLimiters(fpath, c)
+			if err != nil {
+				return err
+			}
+			rl, ok := r[key]
+			if !ok {
+				return fmt.Errorf("%s does not exist in %s", key, fpath)
+			}
+			if err := rl.RevokeTokens(cmd.Context(), token); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "revoked. running instances allow it until their registration cache expires")
+			return nil
+		},
+		SilenceUsage:       true,
+		DisableSuggestions: true,
+	}
+	cmd.PersistentFlags().StringVar(&key, "config-name", "", "config name in the config file")
+	cmd.PersistentFlags().StringVar(&fpath, "config-file", "", "config file path")
+	cmd.PersistentFlags().StringVar(&token, "token", "", "token to revoke")
+	_ = cmd.MarkPersistentFlagRequired("config-file")
+	_ = cmd.MarkPersistentFlagRequired("config-name")
+	_ = cmd.MarkPersistentFlagRequired("token")
+	return cmd
+}
+
 func NewStartServer(c *dynamodb.Client) *cobra.Command {
 	var filepath string
 	cmd := &cobra.Command{
 		Use:  "start-server",
 		Args: cobra.MinimumNArgs(0),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			rl, err := newLimiters(filepath, c)
 			if err != nil {
 				return err
@@ -131,62 +163,36 @@ func NewStartServer(c *dynamodb.Client) *cobra.Command {
 	return cmd
 }
 
-func NewPublishMetric() *cobra.Command {
-	var logGroupName, logStreamName string
-	cmd := &cobra.Command{
-		Use:  "publish-metric",
-		Args: cobra.MinimumNArgs(0),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := newCWLClient(cmd.Context())
-			if err != nil {
-				return err
-			}
-			_, _ = c.CreateLogGroup(cmd.Context(), &cloudwatchlogs.CreateLogGroupInput{
-				LogGroupName: &logGroupName,
-			})
-			_, _ = c.CreateLogStream(cmd.Context(), &cloudwatchlogs.CreateLogStreamInput{
-				LogGroupName:  &logGroupName,
-				LogStreamName: &logStreamName,
-			})
-			err = ReadAndPublish(cmd.Context(), cmd.InOrStdin(), c, logGroupName, logStreamName)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), "published")
-			return nil
-		},
-		SilenceUsage:       true,
-		DisableSuggestions: true,
-	}
-	cmd.PersistentFlags().StringVar(&logGroupName, "log-group-name", "", "log group name")
-	cmd.PersistentFlags().StringVar(&logStreamName, "log-stream-name", "", "log stream name")
-	_ = cmd.MarkPersistentFlagRequired("log-group-name")
-	_ = cmd.MarkPersistentFlagRequired("log-stream-name")
-	return cmd
-}
-
 func main() {
-	c, err := newDDBClient(context.Background())
+	ctx := context.Background()
+	c, err := newDDBClient(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+
+	flush, err := setupMetrics(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer func() { _ = flush(ctx) }()
 
 	var r map[string]*limiter.RateLimit
 	if _, ok := os.LookupEnv(envRunOnLambda); ok {
 		r, err = newLimiters(os.Getenv(envConfigFilepath), c)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			os.Exit(1) //nolint:gocritic // nothing to flush yet
 		}
 	}
 
-	rootCmd := NewRootCmd(r)
+	rootCmd := NewRootCmd(r, flush)
 	rootCmd.AddCommand(
 		NewCreateTableCmd(c),
 		NewCreateToken(c),
+		NewRevokeToken(c),
 		NewStartServer(c),
-		NewPublishMetric(),
 	)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -195,7 +201,7 @@ func main() {
 }
 
 func newLimiters(filepath string, client *dynamodb.Client) (map[string]*limiter.RateLimit, error) {
-	f, err := os.Open(filepath)
+	f, err := os.Open(filepath) //nolint:gosec // the config path is given by the operator
 	if err != nil {
 		return nil, err
 	}
@@ -210,10 +216,19 @@ func newLimiters(filepath string, client *dynamodb.Client) (map[string]*limiter.
 	for key, v := range cfg {
 		rl, err := limiter.New(v, client, limiter.WithLogger(logger.WithGroup(key+"_limiter")))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("config %q in %s: %w", key, filepath, err)
 		}
 		ret[key] = rl
 	}
 
 	return ret, err
+}
+
+// logLevel is info by default. LIMITER_LOG_LEVEL=debug enables debug logs.
+func logLevel() slog.Level {
+	var l slog.Level
+	if err := l.UnmarshalText([]byte(os.Getenv("LIMITER_LOG_LEVEL"))); err != nil {
+		return slog.LevelInfo
+	}
+	return l
 }
