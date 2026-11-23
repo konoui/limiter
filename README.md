@@ -48,8 +48,16 @@ d, err := rl.Allow(ctx, apiKey)
 net/http middleware (sets `Retry-After` and `X-RateLimit-Remaining`, maps DynamoDB throttling to 503):
 
 ```go
-h := limiterhttp.Middleware(rl, keyFunc)(next)
+mw := limiterhttp.Middleware(rl, limiterhttp.HeaderKey("x-api-key"), // or limiterhttp.RemoteIP
+	limiterhttp.WithTimeout(500*time.Millisecond),                    // bound the latency added by DynamoDB
+	limiterhttp.WithSkip(func(r *http.Request) bool { return r.URL.Path == "/healthz" }),
+	limiterhttp.WithErrorHandler(func(r *http.Request, err error) { /* log */ }),
+	limiterhttp.WithRejectHandler(func(w http.ResponseWriter, r *http.Request, res *limiterhttp.Result) { /* custom body */ }),
+)
+h := mw(next) // the next handler can read limiterhttp.FromContext(r.Context())
 ```
+
+`X-RateLimit-Remaining` is exact for a single shard and an underestimate for sharded buckets.
 
 #### Config
 

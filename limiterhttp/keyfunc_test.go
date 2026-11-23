@@ -1,8 +1,10 @@
-package main
+package limiterhttp_test
 
 import (
 	"net/http"
 	"testing"
+
+	"github.com/konoui/limiter/limiterhttp"
 )
 
 func Test_remoteIP(t *testing.T) {
@@ -22,7 +24,7 @@ func Test_remoteIP(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &http.Request{RemoteAddr: tt.remoteAddr}
-			got, err := remoteIP(r)
+			got, err := limiterhttp.RemoteIP(r)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("remoteIP() error = %v, wantErr %v", err, tt.wantErr)
 			}

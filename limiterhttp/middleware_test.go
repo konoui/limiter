@@ -1,6 +1,7 @@
 package limiterhttp_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,58 @@ import (
 
 const headerKey = "x-api-key"
 
-func headerKeyFunc(r *http.Request) (string, error) {
-	v := r.Header.Get(headerKey)
-	if v == "" {
-		return "", fmt.Errorf("%s header has no value", headerKey)
+var headerKeyFunc = limiterhttp.HeaderKey(headerKey)
+
+func TestHeaderKey(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	if _, err := headerKeyFunc(r); err == nil {
+		t.Error("missing header should be an error")
 	}
-	return v, nil
+	r.Header.Set(headerKey, "k")
+	if got, err := headerKeyFunc(r); err != nil || got != "k" {
+		t.Errorf("want k, got %q %v", got, err)
+	}
+}
+
+func TestMiddleware_skip(t *testing.T) {
+	l := mock.NewMockLimiter(gomock.NewController(t)) // Allow must not be called
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if _, ok := limiterhttp.FromContext(r.Context()); ok {
+			t.Error("skipped requests have no result")
+		}
+	})
+	h := limiterhttp.Middleware(l, headerKeyFunc,
+		limiterhttp.WithSkip(func(r *http.Request) bool { return r.Method == http.MethodOptions }))(next)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodOptions, "/", nil))
+	if !called || rec.Code != http.StatusOK {
+		t.Errorf("skipped request should reach the next handler: called %v, status %d", called, rec.Code)
+	}
+}
+
+func TestMiddleware_timeout(t *testing.T) {
+	l := mock.NewMockLimiter(gomock.NewController(t))
+	l.EXPECT().Allow(gomock.Any(), "k").DoAndReturn(func(ctx context.Context, _ string) (limiter.Decision, error) {
+		<-ctx.Done() // a slow DynamoDB
+		return limiter.Decision{}, fmt.Errorf("%w: %w", limiter.ErrInternal, ctx.Err())
+	})
+	h := limiterhttp.Middleware(l, headerKeyFunc, limiterhttp.WithTimeout(10*time.Millisecond))(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("must not be called") }))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(headerKey, "k")
+	rec := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(rec, req)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("timeout did not bound the latency: %v", elapsed)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("want 500, got %d", rec.Code)
+	}
 }
 
 func TestMiddleware(t *testing.T) {

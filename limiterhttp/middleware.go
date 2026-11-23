@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -28,10 +30,12 @@ type Result struct {
 
 type contextKey struct{}
 
+// NewContext returns a context carrying res.
 func NewContext(ctx context.Context, res *Result) context.Context {
 	return context.WithValue(ctx, contextKey{}, res)
 }
 
+// FromContext returns the Result stored by Middleware.
 func FromContext(ctx context.Context) (*Result, bool) {
 	v, ok := ctx.Value(contextKey{}).(*Result)
 	return v, ok
@@ -40,9 +44,24 @@ func FromContext(ctx context.Context) (*Result, bool) {
 type options struct {
 	onReject func(http.ResponseWriter, *http.Request, *Result)
 	onError  func(*http.Request, error)
+	skip     func(*http.Request) bool
+	timeout  time.Duration
 }
 
+// Option configures Middleware and PrepareHandler.
 type Option func(*options)
+
+// WithSkip passes requests for which skip returns true to the next handler without rate limiting,
+// e.g. health checks or CORS preflight requests. FromContext returns false for skipped requests.
+func WithSkip(skip func(*http.Request) bool) Option {
+	return func(o *options) { o.skip = skip }
+}
+
+// WithTimeout bounds the time spent on the limiter per request, including DynamoDB retries.
+// On timeout the limiter returns an error, so the request is rejected with 500 unless fail-open is enabled.
+func WithTimeout(d time.Duration) Option {
+	return func(o *options) { o.timeout = d }
+}
 
 // WithRejectHandler customizes the response of rejected requests.
 // Rate limit headers are already set when it is called.
@@ -62,6 +81,7 @@ func newOptions(opts []Option) *options {
 			http.Error(w, http.StatusText(res.Status), res.Status)
 		},
 		onError: func(*http.Request, error) {},
+		skip:    func(*http.Request) bool { return false },
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -95,13 +115,18 @@ func Middleware(l limiter.Limiter, keyFn KeyFunc, opts ...Option) func(http.Hand
 	o := newOptions(opts)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if o.skip(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			res := &Result{}
 			key, err := keyFn(r)
 			if err != nil {
 				res.Err, res.Status = err, http.StatusBadRequest
 			} else {
 				res.Key = key
-				res.Decision, res.Err = l.Allow(r.Context(), key)
+				res.Decision, res.Err = o.allow(r.Context(), l, key)
 				res.Status = StatusCode(res.Decision, res.Err)
 			}
 			r = r.WithContext(NewContext(r.Context(), res))
@@ -119,7 +144,41 @@ func Middleware(l limiter.Limiter, keyFn KeyFunc, opts ...Option) func(http.Hand
 	}
 }
 
+func (o *options) allow(ctx context.Context, l limiter.Limiter, key string) (limiter.Decision, error) {
+	if o.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, o.timeout)
+		defer cancel()
+	}
+	return l.Allow(ctx, key)
+}
+
+// HeaderKey returns a KeyFunc that uses the value of the header, e.g. an API key.
+func HeaderKey(name string) KeyFunc {
+	return func(r *http.Request) (string, error) {
+		if v := r.Header.Get(name); v != "" {
+			return v, nil
+		}
+		return "", fmt.Errorf("%s header is required", name)
+	}
+}
+
+// RemoteIP is a KeyFunc that uses the client IP address of the connection.
+// RemoteAddr is "host:port" on net/http servers but only "host" on AWS Lambda (aws-lambda-go-api-proxy),
+// where it is the source IP reported by API Gateway.
+// X-Forwarded-For is intentionally ignored because clients can forge it unless a trusted proxy overwrites it.
+func RemoteIP(r *http.Request) (string, error) {
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip, nil
+	}
+	if ip := net.ParseIP(r.RemoteAddr); ip != nil {
+		return ip.String(), nil
+	}
+	return "", fmt.Errorf("invalid remote address: %q", r.RemoteAddr)
+}
+
 func setHeaders(w http.ResponseWriter, res *Result) {
+	// Remaining is exact for a single shard and an underestimate of the whole bucket for sharded buckets.
 	if res.Err == nil {
 		w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(res.Decision.Remaining, 10))
 	}

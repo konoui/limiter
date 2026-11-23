@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"time"
 
@@ -38,29 +37,13 @@ func testHandler(r map[string]*limiter.RateLimit) (http.Handler, error) {
 		fmt.Fprint(w, "ok")
 	})
 
+	// bound the latency added to every request when DynamoDB is slow
+	timeout := limiterhttp.WithTimeout(500 * time.Millisecond)
+
 	mux := http.NewServeMux()
-	mux.Handle("/anon", limiterhttp.Middleware(arl, remoteIP, onError)(ok200))
-	mux.Handle("/", limiterhttp.Middleware(drl, apiKey, onError)(ok200))
+	mux.Handle("/anon", limiterhttp.Middleware(arl, limiterhttp.RemoteIP, onError, timeout)(ok200))
+	mux.Handle("/", limiterhttp.Middleware(drl, limiterhttp.HeaderKey("x-api-key"), onError, timeout)(ok200))
 	return mux, nil
-}
-
-func apiKey(r *http.Request) (string, error) {
-	if v := r.Header.Get("x-api-key"); v != "" {
-		return v, nil
-	}
-	return "", fmt.Errorf("x-api-key header is required")
-}
-
-// remoteIP returns the client IP address.
-// RemoteAddr is "host:port" on net/http server but only "host" on Lambda (aws-lambda-go-api-proxy).
-func remoteIP(r *http.Request) (string, error) {
-	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return ip, nil
-	}
-	if ip := net.ParseIP(r.RemoteAddr); ip != nil {
-		return ip.String(), nil
-	}
-	return "", fmt.Errorf("invalid remote address: %q", r.RemoteAddr)
 }
 
 func StartServer(addr string, handler http.Handler) error {
